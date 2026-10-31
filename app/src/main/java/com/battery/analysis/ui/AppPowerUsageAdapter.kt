@@ -92,6 +92,9 @@ class AppPowerUsageAdapter : RecyclerView.Adapter<RecyclerView.ViewHolder>() {
 
         /** 局部增量刷新载荷：应用瞬时能耗与时长变更（避免重绘图标与标题） */
         const val PAYLOAD_APP_METRICS = 1
+
+        /** 局部增量刷新载荷：场景列表标题栏条目统计数量变更 */
+        const val PAYLOAD_SCENE_HEADER = 2
     }
 
     private val diffCallback = object : DiffUtil.ItemCallback<PowerUsageItem>() {
@@ -139,6 +142,9 @@ class AppPowerUsageAdapter : RecyclerView.Adapter<RecyclerView.ViewHolder>() {
         override fun getChangePayload(oldItem: PowerUsageItem, newItem: PowerUsageItem): Any? {
             if (oldItem is PowerUsageItem.AppUsage && newItem is PowerUsageItem.AppUsage) {
                 return PAYLOAD_APP_METRICS
+            }
+            if (oldItem is PowerUsageItem.SceneHeader && newItem is PowerUsageItem.SceneHeader) {
+                return PAYLOAD_SCENE_HEADER
             }
             return null
         }
@@ -376,11 +382,7 @@ class AppPowerUsageAdapter : RecyclerView.Adapter<RecyclerView.ViewHolder>() {
      * @param binding 视图绑定对象
      */
     inner class SceneHeaderViewHolder(val binding: ItemPowerSceneHeaderBinding) :
-        RecyclerView.ViewHolder(binding.root) {
-        init {
-            setIsRecyclable(false)
-        }
-    }
+        RecyclerView.ViewHolder(binding.root)
 
     /**
      * 单个应用能耗列表项 ViewHolder。
@@ -516,12 +518,15 @@ class AppPowerUsageAdapter : RecyclerView.Adapter<RecyclerView.ViewHolder>() {
     }
 
     override fun onBindViewHolder(holder: RecyclerView.ViewHolder, position: Int, payloads: MutableList<Any>) {
-        if (payloads.isNotEmpty() && holder is AppViewHolder) {
+        if (payloads.isNotEmpty()) {
             val list = differ.currentList
             if (position in list.indices) {
                 val item = list[position]
-                if (item is PowerUsageItem.AppUsage) {
+                if (holder is AppViewHolder && item is PowerUsageItem.AppUsage) {
                     bindAppUsageMetricsPartial(holder, item.data)
+                    return
+                } else if (holder is SceneHeaderViewHolder && item is PowerUsageItem.SceneHeader) {
+                    bindSceneHeader(holder, item)
                     return
                 }
             }
@@ -1303,10 +1308,12 @@ class AppPowerUsageAdapter : RecyclerView.Adapter<RecyclerView.ViewHolder>() {
             }
             tvAvgInfo.setUnitText("Avg:$pwrStr, $avgTempStr | $maxTempStr")
 
-            val effectiveTotalEnergy = if (cachedTotalAppEnergyWh > 0f) {
-                cachedTotalAppEnergyWh
-            } else {
-                displayAppItems.sumOf { it.getForegroundEnergyValue().toDouble() }.toFloat()
+            val sessionTotalWh = cachedOverviewStats?.totalEnergyWh?.takeIf { it > 0.001f }
+            val effectiveTotalEnergy = when {
+                sessionTotalWh != null && cachedTotalAppEnergyWh > 0f -> maxOf(sessionTotalWh, cachedTotalAppEnergyWh)
+                sessionTotalWh != null -> sessionTotalWh
+                cachedTotalAppEnergyWh > 0f -> cachedTotalAppEnergyWh
+                else -> displayAppItems.sumOf { it.getForegroundEnergyValue().toDouble() }.toFloat()
             }
             tvAppEnergy.setUnitText(formatAppEnergyWithPercentage(item, effectiveTotalEnergy, currentDisplayUnit))
 
@@ -1360,10 +1367,12 @@ class AppPowerUsageAdapter : RecyclerView.Adapter<RecyclerView.ViewHolder>() {
             }
             tvAvgInfo.setUnitText("Avg:$pwrStr, $avgTempStr | $maxTempStr")
 
-            val effectiveTotalEnergy = if (cachedTotalAppEnergyWh > 0f) {
-                cachedTotalAppEnergyWh
-            } else {
-                displayAppItems.sumOf { it.getForegroundEnergyValue().toDouble() }.toFloat()
+            val sessionTotalWh = cachedOverviewStats?.totalEnergyWh?.takeIf { it > 0.001f }
+            val effectiveTotalEnergy = when {
+                sessionTotalWh != null && cachedTotalAppEnergyWh > 0f -> maxOf(sessionTotalWh, cachedTotalAppEnergyWh)
+                sessionTotalWh != null -> sessionTotalWh
+                cachedTotalAppEnergyWh > 0f -> cachedTotalAppEnergyWh
+                else -> displayAppItems.sumOf { it.getForegroundEnergyValue().toDouble() }.toFloat()
             }
             tvAppEnergy.setUnitText(formatAppEnergyWithPercentage(item, effectiveTotalEnergy, currentDisplayUnit))
 

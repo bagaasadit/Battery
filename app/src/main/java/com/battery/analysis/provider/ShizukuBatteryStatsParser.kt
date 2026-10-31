@@ -592,25 +592,31 @@ class ShizukuBatteryStatsParser(private val context: Context) {
                         val realFgsMs = hw?.fgsMs ?: 0L
 
                         val appName = getAppName(effectivePkg, pm)
+                        val maxPossibleFgEnergyWh = (com.battery.analysis.manager.PowerUsageManager.MAX_PHYSICAL_DISCHARGE_WATTS * (foregroundMs.toDouble() / 3600000.0)).toFloat()
+                        val maxPossibleBgEnergyWh = (com.battery.analysis.manager.PowerUsageManager.MAX_PHYSICAL_DISCHARGE_WATTS * (effectiveBackgroundMs.toDouble() / 3600000.0)).toFloat()
+                        val safeTotalDirectEnergyWh = totalDirectEnergyWh?.let { minOf(it, maxPossibleFgEnergyWh + maxPossibleBgEnergyWh) }
+                        val safeFgEnergyWh = minOf(fgEnergyWh, maxPossibleFgEnergyWh)
+                        val safeBgEnergyWh = minOf(bgEnergyWh, maxPossibleBgEnergyWh)
+
                         val newItem = AppPowerUsageItem(
                             packageName = effectivePkg,
                             appName = appName,
                             icon = null,
                             foregroundTimeMs = foregroundMs,
-                            avgPowerWatts = avgWatts,
+                            avgPowerWatts = avgWatts.coerceIn(0f, com.battery.analysis.manager.PowerUsageManager.MAX_PHYSICAL_DISCHARGE_WATTS),
                             avgTemperature = appTemp,
                             maxTemperature = maxTemp,
                             lastUsedTimeMs = System.currentTimeMillis(),
-                            directEnergyWh = totalDirectEnergyWh,
+                            directEnergyWh = safeTotalDirectEnergyWh,
                             backgroundTimeMs = effectiveBackgroundMs,
-                            foregroundEnergyWh = fgEnergyWh,
-                            backgroundEnergyWh = bgEnergyWh,
+                            foregroundEnergyWh = safeFgEnergyWh,
+                            backgroundEnergyWh = safeBgEnergyWh,
                             cpuTimeMs = realCpuMs,
                             networkBytes = realNetBytes,
                             wakelockTimeMs = realWakeMs,
                             gpsTimeMs = realGpsMs,
-                            foregroundPowerWatts = fgWatts,
-                            backgroundPowerWatts = bgWatts,
+                            foregroundPowerWatts = fgWatts.coerceIn(0f, com.battery.analysis.manager.PowerUsageManager.MAX_PHYSICAL_DISCHARGE_WATTS),
+                            backgroundPowerWatts = bgWatts.coerceIn(0f, com.battery.analysis.manager.PowerUsageManager.MAX_PHYSICAL_DISCHARGE_WATTS),
                             fgsDurationMs = realFgsMs,
                             isUninstalled = isUninstalled
                         )
@@ -1268,9 +1274,14 @@ class ShizukuBatteryStatsParser(private val context: Context) {
                 }
 
                 val rawDrainMah = pkgDrainMahMap[pkgName] ?: 0f
-                val fgEnergy = if (rawDrainMah > 0f) (rawDrainMah * voltage / 1000f) else 0f
+                val maxPossibleMah = if (voltage > 0f) {
+                    (com.battery.analysis.manager.PowerUsageManager.MAX_PHYSICAL_DISCHARGE_WATTS / voltage * 1000f) * (safeFgTime.toDouble() / 3600000.0).toFloat()
+                } else 0f
+                val safeDrainMah = if (maxPossibleMah > 0f) minOf(rawDrainMah, maxPossibleMah) else rawDrainMah
+                val fgEnergy = if (safeDrainMah > 0f) (safeDrainMah * voltage / 1000f) else 0f
                 val fgHours = safeFgTime / 3600000.0
-                val fgWatts = if (fgHours > 0.0 && fgEnergy > 0f) (fgEnergy / fgHours).toFloat() else 0f
+                val rawFgWatts = if (fgHours > 0.0 && fgEnergy > 0f) (fgEnergy / fgHours).toFloat() else 0f
+                val fgWatts = minOf(rawFgWatts, com.battery.analysis.manager.PowerUsageManager.MAX_PHYSICAL_DISCHARGE_WATTS)
 
                 existingMap[pkgName] = AppPowerUsageItem(
                     packageName = pkgName,
@@ -1317,9 +1328,14 @@ class ShizukuBatteryStatsParser(private val context: Context) {
 
                 val appName = getAppName(pkgName, pm)
                 val rawDrainMah = pkgDrainMahMap[pkgName] ?: 0f
-                val totalEnergy = if (rawDrainMah > 0f) (rawDrainMah * voltage / 1000f) else 0f
+                val maxPossibleMah = if (voltage > 0f) {
+                    (com.battery.analysis.manager.PowerUsageManager.MAX_PHYSICAL_DISCHARGE_WATTS / voltage * 1000f) * (safeBgTime.toDouble() / 3600000.0).toFloat()
+                } else 0f
+                val safeDrainMah = if (maxPossibleMah > 0f) minOf(rawDrainMah, maxPossibleMah) else rawDrainMah
+                val totalEnergy = if (safeDrainMah > 0f) (safeDrainMah * voltage / 1000f) else 0f
                 val bgHours = safeBgTime / 3600000.0
-                val bgWatts = if (bgHours > 0.0 && totalEnergy > 0f) (totalEnergy / bgHours).toFloat() else 0f
+                val rawBgWatts = if (bgHours > 0.0 && totalEnergy > 0f) (totalEnergy / bgHours).toFloat() else 0f
+                val bgWatts = minOf(rawBgWatts, com.battery.analysis.manager.PowerUsageManager.MAX_PHYSICAL_DISCHARGE_WATTS)
 
                 existingMap[pkgName] = AppPowerUsageItem(
                     packageName = pkgName,

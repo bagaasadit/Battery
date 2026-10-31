@@ -819,6 +819,7 @@ class PowerUsageFragment : Fragment() {
      */
     private fun setupRecyclerView() {
         binding.recyclerAppUsage.layoutManager = LinearLayoutManager(requireContext())
+        (binding.recyclerAppUsage.itemAnimator as? androidx.recyclerview.widget.SimpleItemAnimator)?.supportsChangeAnimations = false
         binding.recyclerAppUsage.adapter = adapter
 
         // 注册底部安全内边距监听，动态分配底边距防系统导航键拦截
@@ -1884,8 +1885,17 @@ class PowerUsageFragment : Fragment() {
         } else {
             "--"
         }
-        val avgPowerStr = if (overview.avgPowerWatts in 0.05f..25.0f) {
-            String.format(Locale.getDefault(), "%.2fW", overview.avgPowerWatts)
+        val effectiveAvgWatts = if (overview.avgPowerWatts in 0.05f..25.0f) {
+            overview.avgPowerWatts
+        } else if (overview.screenOffDurationMs <= 0L && overview.screenOnPowerWatts in 0.05f..25.0f) {
+            overview.screenOnPowerWatts
+        } else if (overview.screenOnDurationMs <= 0L && overview.screenOffPowerWatts in 0.05f..25.0f) {
+            overview.screenOffPowerWatts
+        } else {
+            0f
+        }
+        val avgPowerStr = if (effectiveAvgWatts in 0.05f..25.0f) {
+            String.format(Locale.getDefault(), "%.2fW", effectiveAvgWatts)
         } else {
             "--"
         }
@@ -1903,7 +1913,7 @@ class PowerUsageFragment : Fragment() {
         val totalCapacityWh = snapshot.totalEnergyWh
             ?: powerManager.getEffectiveDeviceCapacityMah().takeIf { it > 0f }?.let {
                 BatteryEnergyCalculator.calculateTotalEnergyWh(it)
-            }
+            } ?: (BatteryEnergyCalculator.DEFAULT_CAPACITY_MAH * BatteryEnergyCalculator.DEFAULT_NOMINAL_VOLTAGE_VOLTS / 1000f)
 
         val (onSessionRate, _) = PowerDischargeMetricsViewBinder.calculateSessionDischargeRate(
             BatteryEnergyCalculator.ROW_SCREEN_ON, totalCapacityWh, overview
@@ -2324,7 +2334,7 @@ class PowerUsageFragment : Fragment() {
             ?: powerManager.getTotalEnergyWh()
             ?: powerManager.getEffectiveDeviceCapacityMah().takeIf { it > 0f }?.let {
                 BatteryEnergyCalculator.calculateTotalEnergyWh(it)
-            }
+            } ?: (BatteryEnergyCalculator.DEFAULT_CAPACITY_MAH * BatteryEnergyCalculator.DEFAULT_NOMINAL_VOLTAGE_VOLTS / 1000f)
         val baseTotalEnergy = totalCapacityWh?.takeIf { it > 0f }
 
         // 异步预计算时间轴前缀和索引数据，赋能 120Hz 游标探查零延迟无感联动
@@ -2391,8 +2401,17 @@ class PowerUsageFragment : Fragment() {
         } else {
             "--"
         }
-        val avgPowerStr = if (overview.avgPowerWatts in 0.05f..25.0f) {
-            String.format(Locale.getDefault(), "%.2fW", overview.avgPowerWatts)
+        val effectiveAvgWatts = if (overview.avgPowerWatts in 0.05f..25.0f) {
+            overview.avgPowerWatts
+        } else if (overview.screenOffDurationMs <= 0L && overview.screenOnPowerWatts in 0.05f..25.0f) {
+            overview.screenOnPowerWatts
+        } else if (overview.screenOnDurationMs <= 0L && overview.screenOffPowerWatts in 0.05f..25.0f) {
+            overview.screenOffPowerWatts
+        } else {
+            0f
+        }
+        val avgPowerStr = if (effectiveAvgWatts in 0.05f..25.0f) {
+            String.format(Locale.getDefault(), "%.2fW", effectiveAvgWatts)
         } else {
             "--"
         }
@@ -2671,7 +2690,7 @@ class PowerUsageFragment : Fragment() {
             ?: powerManager.getTotalEnergyWh()
             ?: powerManager.getEffectiveDeviceCapacityMah().takeIf { it > 0f }?.let {
                 BatteryEnergyCalculator.calculateTotalEnergyWh(it)
-            }
+            } ?: (BatteryEnergyCalculator.DEFAULT_CAPACITY_MAH * BatteryEnergyCalculator.DEFAULT_NOMINAL_VOLTAGE_VOLTS / 1000f)
         val baseTotalEnergy = totalCapacityWh?.takeIf { it > 0f }
 
         val onEnergyRatioStr = if (baseTotalEnergy != null) {
@@ -2722,8 +2741,17 @@ class PowerUsageFragment : Fragment() {
         } else {
             "--"
         }
-        val avgPowerStr = if (overview.avgPowerWatts in 0.05f..25.0f) {
-            String.format(Locale.getDefault(), "%.2fW", overview.avgPowerWatts)
+        val effectiveAvgWatts = if (overview.avgPowerWatts in 0.05f..25.0f) {
+            overview.avgPowerWatts
+        } else if (overview.screenOffDurationMs <= 0L && overview.screenOnPowerWatts in 0.05f..25.0f) {
+            overview.screenOnPowerWatts
+        } else if (overview.screenOnDurationMs <= 0L && overview.screenOffPowerWatts in 0.05f..25.0f) {
+            overview.screenOffPowerWatts
+        } else {
+            0f
+        }
+        val avgPowerStr = if (effectiveAvgWatts in 0.05f..25.0f) {
+            String.format(Locale.getDefault(), "%.2fW", effectiveAvgWatts)
         } else {
             "--"
         }

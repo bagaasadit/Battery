@@ -4344,24 +4344,27 @@ class PowerUsageManager private constructor(private val context: Context) {
                 val remScreenOffStr = if (screenOffWatts >= 0.05f) formatHoursToText(energy / screenOffWatts) else "--"
 
                 // 不限制在亮屏总时长内，上限以本次放电周期的实际总时长 durationMs 为准
-                // 若刚拔电或重置（小于5分钟），仅清除明显超出放电总时长的跨周期超大脏数据（>300秒），采样轻微超出则截断为 durationMs
                 val maxAllowedMs = durationMs
                 val rawAppList = stats.appList.map { item ->
-                    if (item.foregroundTimeMs > maxAllowedMs) {
-                        if (effectiveUnplugTime > 0L && (now - effectiveUnplugTime) < 300000L && item.foregroundTimeMs > 300000L) {
-                            val totalE = item.energyWh
-                            item.copy(
-                                foregroundTimeMs = 0L,
-                                foregroundEnergyWh = 0f,
-                                backgroundEnergyWh = totalE,
-                                directEnergyWh = totalE
-                            )
-                        } else {
-                            item.copy(foregroundTimeMs = maxAllowedMs)
-                        }
-                    } else {
-                        item
-                    }
+                    val safeFgMs = item.foregroundTimeMs.coerceAtMost(maxAllowedMs)
+                    val safeBgMs = item.backgroundTimeMs.coerceAtMost(maxAllowedMs)
+                    val maxAppFgEnergyWh = (MAX_PHYSICAL_DISCHARGE_WATTS * (safeFgMs.toFloat() / 3600000f)).coerceAtLeast(0f)
+                    val maxAppBgEnergyWh = (MAX_PHYSICAL_DISCHARGE_WATTS * (safeBgMs.toFloat() / 3600000f)).coerceAtLeast(0f)
+                    val maxTotalEnergyWh = maxAppFgEnergyWh + maxAppBgEnergyWh
+                    val safeDirectEnergy = item.directEnergyWh?.let { minOf(it, maxTotalEnergyWh) }
+                    val safeFgEnergy = minOf(item.foregroundEnergyWh, maxAppFgEnergyWh)
+                    val safeBgEnergy = minOf(item.backgroundEnergyWh, maxAppBgEnergyWh)
+
+                    item.copy(
+                        foregroundTimeMs = safeFgMs,
+                        backgroundTimeMs = safeBgMs,
+                        foregroundEnergyWh = safeFgEnergy,
+                        backgroundEnergyWh = safeBgEnergy,
+                        directEnergyWh = safeDirectEnergy,
+                        avgPowerWatts = item.avgPowerWatts.coerceIn(0f, MAX_PHYSICAL_DISCHARGE_WATTS),
+                        foregroundPowerWatts = item.foregroundPowerWatts.coerceIn(0f, MAX_PHYSICAL_DISCHARGE_WATTS),
+                        backgroundPowerWatts = item.backgroundPowerWatts.coerceIn(0f, MAX_PHYSICAL_DISCHARGE_WATTS)
+                    )
                 }.filter {
                     if (enableBackgroundStats) {
                         it.foregroundTimeMs > 0L || it.backgroundTimeMs > 0L || it.backgroundEnergyWh > 0.001f || it.energyWh > 0.001f || (it.isUninstalledApp() && it.hasEffectiveEnergy())
@@ -4534,9 +4537,13 @@ class PowerUsageManager private constructor(private val context: Context) {
                 } else screenOffWatts.coerceAtMost(MAX_PHYSICAL_DISCHARGE_WATTS)
                 val finalRealTotalEnergyWh = onEnergyWh + finalOffEnergyWh
                 val rawFinalAvgWatts = if (dischargeHours > 0f && finalRealTotalEnergyWh > 0f) finalRealTotalEnergyWh / dischargeHours else avgWatts
-                val finalAvgWatts = if (rawFinalAvgWatts.isFinite() && rawFinalAvgWatts <= MAX_PHYSICAL_DISCHARGE_WATTS) {
-                    rawFinalAvgWatts
-                } else avgWatts.coerceAtMost(MAX_PHYSICAL_DISCHARGE_WATTS)
+                val finalAvgWatts = when {
+                    rawFinalAvgWatts.isFinite() && rawFinalAvgWatts in 0.05f..MAX_PHYSICAL_DISCHARGE_WATTS -> rawFinalAvgWatts
+                    avgWatts in 0.05f..MAX_PHYSICAL_DISCHARGE_WATTS -> avgWatts
+                    screenOffMs <= 0L && screenOnWatts in 0.05f..MAX_PHYSICAL_DISCHARGE_WATTS -> screenOnWatts
+                    screenOnMs <= 0L && finalScreenOffWatts in 0.05f..MAX_PHYSICAL_DISCHARGE_WATTS -> finalScreenOffWatts
+                    else -> 0f
+                }
 
                 val targetCapacityMah = if (stats.capacityMah > 0f) stats.capacityMah else effectiveCapacity
                 val nominalTotalWh = if (targetCapacityMah > 0f && nominalVoltageVolts > 0f) (targetCapacityMah * nominalVoltageVolts / 1000f) else finalRealTotalEnergyWh
@@ -4639,19 +4646,23 @@ class PowerUsageManager private constructor(private val context: Context) {
         val normalScreenOnMs = appUsageList.sumOf { it.foregroundTimeMs }.coerceAtMost(elapsedMs)
         val maxAllowedNormalMs = elapsedMs
         val rawNormalList = appUsageList.map { item ->
-            val safeFg = if (item.foregroundTimeMs > maxAllowedNormalMs) {
-                if (unplugTime > 0L && (now - unplugTime) < 300000L && item.foregroundTimeMs > 300000L) {
-                    0L
-                } else {
-                    maxAllowedNormalMs
-                }
-            } else {
-                item.foregroundTimeMs
-            }
-            // 单应用放电物理守恒：前台时长与后台时长之和绝不可超过当前周期放电总时长
+            val safeFg = item.foregroundTimeMs.coerceAtMost(maxAllowedNormalMs)
             val maxBgForApp = (maxAllowedNormalMs - safeFg).coerceAtLeast(0L)
             val safeBg = item.backgroundTimeMs.coerceIn(0L, maxBgForApp)
-            item.copy(foregroundTimeMs = safeFg, backgroundTimeMs = safeBg)
+            val maxAppFgEnergyWh = (MAX_PHYSICAL_DISCHARGE_WATTS * (safeFg.toFloat() / 3600000f)).coerceAtLeast(0f)
+            val maxAppBgEnergyWh = (MAX_PHYSICAL_DISCHARGE_WATTS * (safeBg.toFloat() / 3600000f)).coerceAtLeast(0f)
+            val maxTotalEnergyWh = maxAppFgEnergyWh + maxAppBgEnergyWh
+
+            item.copy(
+                foregroundTimeMs = safeFg,
+                backgroundTimeMs = safeBg,
+                foregroundEnergyWh = minOf(item.foregroundEnergyWh, maxAppFgEnergyWh),
+                backgroundEnergyWh = minOf(item.backgroundEnergyWh, maxAppBgEnergyWh),
+                directEnergyWh = item.directEnergyWh?.let { minOf(it, maxTotalEnergyWh) },
+                avgPowerWatts = item.avgPowerWatts.coerceIn(0f, MAX_PHYSICAL_DISCHARGE_WATTS),
+                foregroundPowerWatts = item.foregroundPowerWatts.coerceIn(0f, MAX_PHYSICAL_DISCHARGE_WATTS),
+                backgroundPowerWatts = item.backgroundPowerWatts.coerceIn(0f, MAX_PHYSICAL_DISCHARGE_WATTS)
+            )
         }.filter {
             it.foregroundTimeMs > 0L || isAssistantScreenApp(it.packageName) || (it.isUninstalledApp() && it.hasEffectiveEnergy()) || ((it.directEnergyWh ?: 0f) > 0.001f) || (enableBackgroundStats && (it.backgroundTimeMs > 0L || it.energyWh > 0.001f))
         }
@@ -5709,11 +5720,12 @@ class PowerUsageManager private constructor(private val context: Context) {
                         null
                     }
 
-                    val selfCalcWatts = if (item.foregroundPowerWatts > 0.05f) {
+                    val selfCalcWatts = if (item.foregroundPowerWatts in 0.05f..MAX_PHYSICAL_DISCHARGE_WATTS) {
                         item.foregroundPowerWatts
                     } else if (item.foregroundEnergyWh > 0.0001f && fgHours > 0f) {
-                        (item.foregroundEnergyWh / fgHours).toFloat()
-                    } else if (item.avgPowerWatts > 0.05f && !isHomeLauncher(item.packageName)) {
+                        val derived = (item.foregroundEnergyWh / fgHours).toFloat()
+                        if (derived in 0.05f..MAX_PHYSICAL_DISCHARGE_WATTS) derived else null
+                    } else if (item.avgPowerWatts in 0.05f..MAX_PHYSICAL_DISCHARGE_WATTS && !isHomeLauncher(item.packageName)) {
                         item.avgPowerWatts
                     } else {
                         null
@@ -5721,12 +5733,13 @@ class PowerUsageManager private constructor(private val context: Context) {
 
                     // 严格遵循真实物理数据原则：若无硬件采样且无底层权威指标，不人为保底成整机亮屏功耗（杜绝全员雷同 1.85W）
                     val detectedWatts = windowAvgWatts ?: selfCalcWatts ?: 0f
-                    finalFgWatts = (Math.round(detectedWatts * 100f) / 100f).coerceAtLeast(0f)
-                    finalFgEnergy = (finalFgWatts * fgHours).coerceAtLeast(0f)
+                    finalFgWatts = (Math.round(detectedWatts * 100f) / 100f).coerceIn(0f, MAX_PHYSICAL_DISCHARGE_WATTS)
+                    val maxAllowedEnergy = (MAX_PHYSICAL_DISCHARGE_WATTS * fgHours).coerceAtLeast(0f)
+                    finalFgEnergy = (finalFgWatts * fgHours).coerceIn(0f, maxAllowedEnergy)
                 }
             } else {
                 finalFgWatts = 0f
-                finalFgEnergy = if (item.foregroundEnergyWh > 0f) item.foregroundEnergyWh else (item.directEnergyWh ?: 0f)
+                finalFgEnergy = 0f
             }
 
             // 计算真实电池温度（优先采用该应用运行时实测加权平均温度与最高温度）
@@ -5772,16 +5785,21 @@ class PowerUsageManager private constructor(private val context: Context) {
                 }
             }
 
+            val maxAppFgEnergyWh = (MAX_PHYSICAL_DISCHARGE_WATTS * (effectiveFgMs.toFloat() / 3600000f)).coerceAtLeast(0f)
+            val safeFgEnergy = minOf(finalFgEnergy, maxAppFgEnergyWh)
+            val maxAppBgEnergyWh = (MAX_PHYSICAL_DISCHARGE_WATTS * (item.backgroundTimeMs.toFloat() / 3600000f)).coerceAtLeast(0f)
+            val safeBgEnergy = minOf(item.backgroundEnergyWh, maxAppBgEnergyWh)
+
             item.copy(
                 foregroundTimeMs = effectiveFgMs,
-                avgPowerWatts = if (effectiveFgMs > 0L) finalFgWatts else item.avgPowerWatts,
+                avgPowerWatts = if (effectiveFgMs > 0L) finalFgWatts else item.avgPowerWatts.coerceIn(0f, MAX_PHYSICAL_DISCHARGE_WATTS),
                 foregroundPowerWatts = finalFgWatts,
-                backgroundPowerWatts = item.backgroundPowerWatts,
+                backgroundPowerWatts = item.backgroundPowerWatts.coerceIn(0f, MAX_PHYSICAL_DISCHARGE_WATTS),
                 avgTemperature = avgTemp,
                 maxTemperature = maxTemp,
-                foregroundEnergyWh = finalFgEnergy,
-                backgroundEnergyWh = item.backgroundEnergyWh,
-                directEnergyWh = if (effectiveFgMs > 0L) finalFgEnergy else item.directEnergyWh
+                foregroundEnergyWh = safeFgEnergy,
+                backgroundEnergyWh = safeBgEnergy,
+                directEnergyWh = if (effectiveFgMs > 0L) safeFgEnergy else minOf(item.directEnergyWh ?: 0f, safeBgEnergy)
             )
         }.toMutableList()
 
@@ -6632,6 +6650,8 @@ class PowerUsageManager private constructor(private val context: Context) {
             val initHwSample = SysfsBatterySampler.sampleHardwareDischarge(context, curStatus.voltageVolts, curStatus.temperature)
             val initPower = initHwSample?.powerWatts ?: 0f
             resetDischargeRealtimeSamples(now, curStatus.levelPercent, curStatus.voltageVolts, curStatus.temperature, initPower, true)
+            // 拔电开始全新放电会话时，立即彻底重置剩余续航时序平滑器记忆
+            com.battery.analysis.domain.estimator.EnduranceRuntimeSmoother.getInstance().reset()
 
             editor.putLong(PREF_KEY_LAST_UNPLUG_TIME, now)
                 .putInt(PREF_KEY_LAST_UNPLUG_LEVEL, curStatus.levelPercent.coerceIn(0, 100))
@@ -7011,9 +7031,13 @@ class PowerUsageManager private constructor(private val context: Context) {
         } else screenOffPower.coerceAtMost(MAX_PHYSICAL_DISCHARGE_WATTS)
         val finalRealTotalEnergyWh = onEnergyWh + finalOffEnergyWh
         val rawFinalAvgWatts = if (dischargeHours > 0f && finalRealTotalEnergyWh > 0f) finalRealTotalEnergyWh / dischargeHours else avgPower
-        val finalAvgWatts = if (rawFinalAvgWatts.isFinite() && rawFinalAvgWatts <= MAX_PHYSICAL_DISCHARGE_WATTS) {
-            rawFinalAvgWatts
-        } else avgPower.coerceAtMost(MAX_PHYSICAL_DISCHARGE_WATTS)
+        val finalAvgWatts = when {
+            rawFinalAvgWatts.isFinite() && rawFinalAvgWatts in 0.05f..MAX_PHYSICAL_DISCHARGE_WATTS -> rawFinalAvgWatts
+            avgPower in 0.05f..MAX_PHYSICAL_DISCHARGE_WATTS -> avgPower
+            screenOffMs <= 0L && screenOnPower in 0.05f..MAX_PHYSICAL_DISCHARGE_WATTS -> screenOnPower
+            screenOnMs <= 0L && finalScreenOffWatts in 0.05f..MAX_PHYSICAL_DISCHARGE_WATTS -> finalScreenOffWatts
+            else -> 0f
+        }
 
         val nominalTotalWh = if (effectiveCapacity > 0f && nominalVoltageVolts > 0f) (effectiveCapacity * nominalVoltageVolts / 1000f) else finalRealTotalEnergyWh
         val screenOffPercent = if (nominalTotalWh > 0f && finalOffEnergyWh > 0f) (finalOffEnergyWh / nominalTotalWh) * 100f else 0f

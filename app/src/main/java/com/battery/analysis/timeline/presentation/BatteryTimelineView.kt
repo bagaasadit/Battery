@@ -1131,10 +1131,11 @@ class BatteryTimelineView @JvmOverloads constructor(
      * @return 格式化后的功耗描述文本
      */
     private fun formatPowerWatts(pWatts: Float): String {
-        return if (pWatts < 1.0f) {
-            String.format(Locale.getDefault(), "%.2fW", pWatts)
+        val absP = abs(pWatts)
+        return if (absP < 1.0f) {
+            String.format(Locale.getDefault(), "%.2fW", absP)
         } else {
-            String.format(Locale.getDefault(), "%.1fW", pWatts)
+            String.format(Locale.getDefault(), "%.1fW", absP)
         }
     }
 
@@ -1387,9 +1388,8 @@ class BatteryTimelineView @JvmOverloads constructor(
             formatHeaderEnergy(wh, displayUnit)
         }
         val powerStr = lastSample?.let {
-            val pWatts = it.getPowerWatts()
-            val signedPower = if (pWatts > 0) -pWatts else pWatts
-            String.format(Locale.getDefault(), "%.2fW", signedPower)
+            val pWatts = abs(it.getPowerWatts())
+            String.format(Locale.getDefault(), "%.2fW", pWatts)
         }
         val tempStr = lastSample?.let { String.format(Locale.getDefault(), "%.1f℃", it.temperatureC) }
         val voltStr = lastSample?.let { String.format(Locale.getDefault(), "%.3fV", it.getVoltageVolts()) }
@@ -2383,9 +2383,8 @@ class BatteryTimelineView @JvmOverloads constructor(
                 formatHeaderEnergy(wh, displayUnit)
             }
             powerStr = curSample?.let {
-                val pWatts = it.getPowerWatts()
-                val signedPower = if (pWatts > 0) -pWatts else pWatts
-                String.format(Locale.getDefault(), "%.2fW", signedPower)
+                val pWatts = abs(it.getPowerWatts())
+                String.format(Locale.getDefault(), "%.2fW", pWatts)
             }
             tempStr = curSample?.let { String.format(Locale.getDefault(), "%.1f℃", it.temperatureC) }
             voltStr = curSample?.let { String.format(Locale.getDefault(), "%.3fV", it.getVoltageVolts()) }

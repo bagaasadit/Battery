@@ -78,7 +78,8 @@ class EnduranceRuntimeSmoother {
         val lastSmoothedRemainingMs: Long,
         val lastTimestampMs: Long,
         val lastBatteryLevel: Float?,
-        val hasAuthoritativeLongTerm: Boolean = false
+        val hasAuthoritativeLongTerm: Boolean = false,
+        val riseStartTimestampMs: Long = 0L
     )
 
     /** 独立维度的时序平滑状态缓存字典 */
@@ -180,6 +181,19 @@ class EnduranceRuntimeSmoother {
             return rawTargetRemainingMs
         }
 
+        // 核心修正：当旧平滑基准严重异常偏低（如 < 15 分钟，而真实目标 > 1 小时）
+        // 判定为前置故障残留计算，直接重新锚定基准
+        if (prevState.lastSmoothedRemainingMs < 900_000L && rawTargetRemainingMs > 3600_000L) {
+            dimensionStates[dimension] = DimensionState(
+                lastSmoothedRemainingMs = rawTargetRemainingMs,
+                lastTimestampMs = currentTimestampMs,
+                lastBatteryLevel = batteryLevelPercent,
+                hasAuthoritativeLongTerm = hasAuthoritativeLongTerm || prevState.hasAuthoritativeLongTerm,
+                riseStartTimestampMs = 0L
+            )
+            return rawTargetRemainingMs
+        }
+
         val elapsedMs = currentTimestampMs - prevState.lastTimestampMs
 
         // 挂钟时间异常判定（时间倒流或跨越超过 24 小时）：重新确立基线
@@ -206,6 +220,7 @@ class EnduranceRuntimeSmoother {
         val elapsedSec = elapsedMs / 1000.0
 
         // 2. 根据工况突变状态与目标差值执行非对称自适应阻尼滤波
+        var newRiseStartTs = 0L
         val smoothedMs = when {
             // Case A: 确认发生重载工况突变且物理目标续航显著缩短（如启动游戏）
             isRegimeChanging && rawTargetRemainingMs < decayedRemainingMs -> {
@@ -244,7 +259,10 @@ class EnduranceRuntimeSmoother {
             // - 在长时间跨度下（>= 3分钟）：允许以慢速常数 TAU_RISE_SEC 渐近收敛，并严格受限于 MAX_UPWARD_SLEW_RATE，
             //   既彻底杜绝同一会话内骤然暴涨，又彻底终结退出游戏后时间死扣到 0 的单向死锁缺陷！
             else -> {
-                if (elapsedMs < SHORT_TERM_DEADBAND_MS) {
+                val riseStart = if (prevState.riseStartTimestampMs > 0L) prevState.riseStartTimestampMs else currentTimestampMs
+                newRiseStartTs = riseStart
+                val durationInRise = currentTimestampMs - riseStart
+                if (durationInRise < SHORT_TERM_DEADBAND_MS && elapsedMs < SHORT_TERM_DEADBAND_MS) {
                     decayedRemainingMs
                 } else {
                     val alpha = 1.0 - exp(-elapsedSec / TAU_RISE_SEC)
@@ -261,7 +279,8 @@ class EnduranceRuntimeSmoother {
             lastSmoothedRemainingMs = smoothedMs,
             lastTimestampMs = currentTimestampMs,
             lastBatteryLevel = batteryLevelPercent,
-            hasAuthoritativeLongTerm = hasAuthoritativeLongTerm || prevState.hasAuthoritativeLongTerm
+            hasAuthoritativeLongTerm = hasAuthoritativeLongTerm || prevState.hasAuthoritativeLongTerm,
+            riseStartTimestampMs = newRiseStartTs
         )
 
         return smoothedMs
