@@ -28,9 +28,14 @@ class HeartbeatAlarmReceiver : BroadcastReceiver() {
         if (intent?.action != BatteryMonitorService.ACTION_HEARTBEAT_ALARM) return
         val appContext = context.applicationContext
         try {
-            if (BatteryMonitorService.isServiceEnabled(appContext)) {
-                // 服务仍配置为启用：无论当前是否在运行，均尝试启动（系统会幂等处理已运行的情况）
-                BatteryMonitorService.start(appContext)
+            if (BatteryMonitorService.shouldServiceRun(appContext)) {
+                if (!BatteryMonitorService.isServiceActive()) {
+                    // 服务被杀，自愈重启
+                    BatteryMonitorService.start(appContext)
+                } else {
+                    // 服务仍在正常运行：仅无缝续期下一次低功耗心跳，避免重复触发 onStartCommand 与 SystemUI 唤醒
+                    BatteryMonitorService.scheduleHeartbeatAlarm(appContext)
+                }
             }
             // 服务未配置为启用（用户主动关闭）：不重启，心跳链自然终止
         } catch (e: Exception) {

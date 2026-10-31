@@ -27,6 +27,11 @@ object CurrentCalibrationManager {
     /** 支持的 10 的倍数电流校准倍率档位列表（包含正负数量级） */
     val SUPPORTED_MULTIPLIERS = floatArrayOf(-1000f, -100f, -10f, -1f, 1f, 10f, 100f, 1000f)
 
+    @Volatile private var cachedMultiplier: Float? = null
+    @Volatile private var cachedDualCell: Boolean? = null
+    @Volatile private var cachedInvertPolarity: Boolean? = null
+    @Volatile private var cachedCoulombFallback: Boolean? = null
+
     /**
      * 获取电流校准配置专用的 [SharedPreferences] 实例。
      *
@@ -38,13 +43,15 @@ object CurrentCalibrationManager {
     }
 
     /**
-     * 获取用户配置的电流校准倍率。
+     * 获取用户配置的电流校准倍率（内存高频直读，0 IPC 开销）。
      *
      * @param context 应用程序上下文
      * @return 电流校准倍率浮点数（默认为 1.0f，支持 -1000f 到 1000f）
      */
     fun getMultiplier(context: Context): Float {
-        return getPrefs(context).getFloat(KEY_CALIBRATION_MULTIPLIER, DEFAULT_MULTIPLIER)
+        return cachedMultiplier ?: getPrefs(context).getFloat(KEY_CALIBRATION_MULTIPLIER, DEFAULT_MULTIPLIER).also {
+            cachedMultiplier = it
+        }
     }
 
     /**
@@ -59,17 +66,20 @@ object CurrentCalibrationManager {
         } else {
             DEFAULT_MULTIPLIER
         }
+        cachedMultiplier = validMultiplier
         getPrefs(context).edit().putFloat(KEY_CALIBRATION_MULTIPLIER, validMultiplier).apply()
     }
 
     /**
-     * 获取是否开启双电芯电流翻倍校准。
+     * 获取是否开启双电芯电流翻倍校准（内存高频直读）。
      *
      * @param context 应用程序上下文
      * @return 若开启双电芯模式返回 true，否则返回 false（默认 false）
      */
     fun isDualCellEnabled(context: Context): Boolean {
-        return getPrefs(context).getBoolean(KEY_DUAL_CELL, false)
+        return cachedDualCell ?: getPrefs(context).getBoolean(KEY_DUAL_CELL, false).also {
+            cachedDualCell = it
+        }
     }
 
     /**
@@ -79,17 +89,20 @@ object CurrentCalibrationManager {
      * @param enabled 是否开启双电芯模式
      */
     fun setDualCellEnabled(context: Context, enabled: Boolean) {
+        cachedDualCell = enabled
         getPrefs(context).edit().putBoolean(KEY_DUAL_CELL, enabled).apply()
     }
 
     /**
-     * 获取是否开启电流极性反转（手动开关状态）。
+     * 获取是否开启电流极性反转（手动开关状态，内存直读）。
      *
      * @param context 应用程序上下文
      * @return 若用户手动开启极性反转返回 true，否则返回 false（默认 false）
      */
     fun isInvertPolarity(context: Context): Boolean {
-        return getPrefs(context).getBoolean(KEY_INVERT_POLARITY, false)
+        return cachedInvertPolarity ?: getPrefs(context).getBoolean(KEY_INVERT_POLARITY, false).also {
+            cachedInvertPolarity = it
+        }
     }
 
     /**
@@ -99,6 +112,7 @@ object CurrentCalibrationManager {
      * @param invert 是否手动反转极性
      */
     fun setInvertPolarity(context: Context, invert: Boolean) {
+        cachedInvertPolarity = invert
         getPrefs(context).edit().putBoolean(KEY_INVERT_POLARITY, invert).apply()
     }
 
@@ -117,13 +131,15 @@ object CurrentCalibrationManager {
     }
 
     /**
-     * 获取是否开启库仑计电荷差分推算补偿功能。
+     * 获取是否开启库仑计电荷差分推算补偿功能（内存直读）。
      *
      * @param context 应用程序上下文
      * @return 若开启库仑计推算补偿返回 true，否则返回 false（默认 true）
      */
     fun isCoulombFallbackEnabled(context: Context): Boolean {
-        return getPrefs(context).getBoolean(KEY_COULOMB_FALLBACK, true)
+        return cachedCoulombFallback ?: getPrefs(context).getBoolean(KEY_COULOMB_FALLBACK, true).also {
+            cachedCoulombFallback = it
+        }
     }
 
     /**
@@ -133,6 +149,7 @@ object CurrentCalibrationManager {
      * @param enabled 是否开启库仑计差分推算
      */
     fun setCoulombFallbackEnabled(context: Context, enabled: Boolean) {
+        cachedCoulombFallback = enabled
         getPrefs(context).edit().putBoolean(KEY_COULOMB_FALLBACK, enabled).apply()
     }
 

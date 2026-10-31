@@ -231,6 +231,8 @@ class KeepAliveAccessibilityService : AccessibilityService() {
      */
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
         if (event == null) return
+        val pm = getSystemService(Context.POWER_SERVICE) as? PowerManager
+        if (pm != null && !pm.isInteractive) return // 息屏休眠阶段直接返回，绝不执行额外计算
         val pkg = event.packageName?.toString() ?: return
         val lower = pkg.lowercase()
         val now = System.currentTimeMillis()

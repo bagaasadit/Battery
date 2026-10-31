@@ -15,6 +15,15 @@ import com.battery.analysis.model.PowerUsageRecord
 class PowerUsageDbHelper private constructor(context: Context) :
     SQLiteOpenHelper(context, DATABASE_NAME, null, DATABASE_VERSION) {
 
+    override fun onConfigure(db: SQLiteDatabase) {
+        super.onConfigure(db)
+        db.enableWriteAheadLogging()
+        try {
+            db.execSQL("PRAGMA synchronous = NORMAL")
+            db.execSQL("PRAGMA temp_store = MEMORY")
+        } catch (_: Exception) {}
+    }
+
     /**
      * 数据库表初次创建时的表结构定义。
      *
@@ -371,9 +380,17 @@ class PowerUsageDbHelper private constructor(context: Context) :
             }
         }
 
-        for (delId in idToDelete) {
-            val rows = db.delete(TABLE_NAME, "$COL_ID = ?", arrayOf(delId.toString()))
-            if (rows > 0) deletedCount++
+        if (idToDelete.isNotEmpty()) {
+            db.beginTransaction()
+            try {
+                for (delId in idToDelete) {
+                    val rows = db.delete(TABLE_NAME, "$COL_ID = ?", arrayOf(delId.toString()))
+                    if (rows > 0) deletedCount++
+                }
+                db.setTransactionSuccessful()
+            } finally {
+                db.endTransaction()
+            }
         }
 
         return deletedCount
@@ -426,6 +443,9 @@ class PowerUsageDbHelper private constructor(context: Context) :
         return db.update(TABLE_NAME, values, whereClause, whereArgs)
     }
 
+    @Volatile
+    private var isLegacyCleaned: Boolean = false
+
     /**
      * 查询所有已持久化的耗电历史记录，按时间从近到远倒序排列。
      * 自动执行单会话进行中自愈守护：物理上整机在同一时刻至多只允许存在一个处于“放电中”（RUNNING）的活跃会话。
@@ -436,20 +456,20 @@ class PowerUsageDbHelper private constructor(context: Context) :
      */
     fun getAllRecords(): List<PowerUsageRecord> {
         val list = mutableListOf<PowerUsageRecord>()
-        val db = writableDatabase
 
-        // 自动清理历史累积遗留的充电异常脏记录，保证耗电历史绝对纯净：
-        // 1. is_charging = 1 的记录
-        // 2. 平均放电功耗 <= 0 且时长大于 1 分钟的已完结虚假耗电记录（实际在充电状态下误生成的记录）
-        // 严格保护：严禁误杀正在进行中（is_completed = 0）的放电草稿，草稿在放电初始阶段功耗尚未形成微积分采样属于正常物理过程
-        try {
-            db.delete(
-                TABLE_NAME,
-                "$COL_IS_CHARGING = 1 OR ($COL_IS_COMPLETED = 1 AND $COL_AVG_POWER_WATTS <= 0.001 AND ($COL_TOTAL_DURATION LIKE '%m%' OR $COL_TOTAL_DURATION LIKE '%h%' OR $COL_TOTAL_DURATION LIKE '%d%'))",
-                null
-            )
-        } catch (_: Exception) {}
+        // 仅在首次启动时执行一次全表异常清理，避免每次读取阻塞 UI 并锁表写盘
+        if (!isLegacyCleaned) {
+            isLegacyCleaned = true
+            try {
+                writableDatabase.delete(
+                    TABLE_NAME,
+                    "$COL_IS_CHARGING = 1 OR ($COL_IS_COMPLETED = 1 AND $COL_AVG_POWER_WATTS <= 0.001 AND ($COL_TOTAL_DURATION LIKE '%m%' OR $COL_TOTAL_DURATION LIKE '%h%' OR $COL_TOTAL_DURATION LIKE '%d%'))",
+                    null
+                )
+            } catch (_: Exception) {}
+        }
 
+        val db = readableDatabase
         try {
             val cursor = db.query(
                 TABLE_NAME,
@@ -462,8 +482,9 @@ class PowerUsageDbHelper private constructor(context: Context) :
             )
             cursor.use { c ->
                 if (c.moveToFirst()) {
+                    val indices = CursorIndices(c)
                     do {
-                        list.add(parseRecordFromCursor(c))
+                        list.add(parseRecordFromCursor(c, indices))
                     } while (c.moveToNext())
                 }
             }
@@ -562,14 +583,7 @@ class PowerUsageDbHelper private constructor(context: Context) :
         }
     }
 
-    /**
-     * 将 Cursor 当前指向的数据行解析构建为 [PowerUsageRecord] 数据实体。
-     * 具备字段容错能力，向下平滑兼容缺省列。
-     *
-     * @param c 移动到有效行位置的数据库 [Cursor]
-     * @return 还原构建的 [PowerUsageRecord] 实例
-     */
-    private fun parseRecordFromCursor(c: android.database.Cursor): PowerUsageRecord {
+    private class CursorIndices(c: android.database.Cursor) {
         val idxId = c.getColumnIndex(COL_ID)
         val idxTime = c.getColumnIndex(COL_RECORD_TIME)
         val idxLvl = c.getColumnIndex(COL_LEVEL_PERCENT)
@@ -606,35 +620,56 @@ class PowerUsageDbHelper private constructor(context: Context) :
         val idxAwakeMah = c.getColumnIndex(COL_SCREEN_OFF_AWAKE_DRAIN_MAH)
         val idxSleepMah = c.getColumnIndex(COL_SCREEN_OFF_DEEP_SLEEP_DRAIN_MAH)
         val idxDecomposed = c.getColumnIndex(COL_IS_SCREEN_OFF_DECOMPOSED)
+    }
 
+    /**
+     * 将 Cursor 当前指向的数据行解析构建为 [PowerUsageRecord] 数据实体。
+     * 具备字段容错能力，向下平滑兼容缺省列。
+     *
+     * @param c 移动到有效行位置的数据库 [Cursor]
+     * @param indices 预缓存的列索引，避免循环中重复调用 getColumnIndex
+     * @return 还原构建的 [PowerUsageRecord] 实例
+     */
+    private fun parseRecordFromCursor(c: android.database.Cursor, indices: CursorIndices = CursorIndices(c)): PowerUsageRecord {
         return PowerUsageRecord(
-            id = if (idxId >= 0) c.getLong(idxId) else 0L,
-            recordTime = if (idxTime >= 0) c.getString(idxTime) ?: "" else "",
-            levelPercent = if (idxLvl >= 0) c.getInt(idxLvl) else 0,
-            voltageVolts = if (idxVolt >= 0) c.getFloat(idxVolt) else 0f,
-            temperature = if (idxTemp >= 0) c.getFloat(idxTemp) else 0f,
-            energyWh = if (idxWh >= 0) c.getFloat(idxWh) else 0f,
-            isCharging = if (idxChg >= 0) c.getInt(idxChg) == 1 else false,
-            avgPowerWatts = if (idxAvgPwr >= 0) c.getFloat(idxAvgPwr) else 0f,
-            screenOnPowerWatts = if (idxOnPwr >= 0) c.getFloat(idxOnPwr) else 0f,
-            screenOffPowerWatts = if (idxOffPwr >= 0) c.getFloat(idxOffPwr) else 0f,
-            screenOnDurationText = if (idxOnDur >= 0) c.getString(idxOnDur) ?: "" else "",
-            screenOffDurationText = if (idxOffDur >= 0) c.getString(idxOffDur) ?: "" else "",
-            totalDurationText = if (idxTotDur >= 0) c.getString(idxTotDur) ?: "" else "",
-            remainingScreenOnText = if (idxRemOn >= 0) c.getString(idxRemOn) ?: "" else "",
-            remainingCompositeText = if (idxRemComp >= 0) c.getString(idxRemComp) ?: "" else "",
-            remainingScreenOffText = if (idxRemOff >= 0) c.getString(idxRemOff) ?: "" else "",
-            isShizukuRealData = if (idxShizuku >= 0) c.getInt(idxShizuku) == 1 else false,
-            appCount = if (idxAppCnt >= 0) c.getInt(idxAppCnt) else 0,
-            trendPointsJson = if (idxPts >= 0) c.getString(idxPts) ?: "[]" else "[]",
-            appListJson = if (idxApps >= 0) c.getString(idxApps) ?: "[]" else "[]",
-            backgroundPowerWatts = if (idxBgPwr >= 0) c.getFloat(idxBgPwr) else 0f,
-            backgroundDurationText = if (idxBgDur >= 0) c.getString(idxBgDur) ?: "" else "",
-            remainingBackgroundText = if (idxRemBg >= 0) c.getString(idxRemBg) ?: "" else "",
-            screenOnEnergyWh = if (idxOnWh >= 0) c.getFloat(idxOnWh) else 0f,
-            totalEnergyWh = if (idxTotWh >= 0) c.getFloat(idxTotWh) else 0f,
-            screenOffEnergyWh = if (idxOffWh >= 0) c.getFloat(idxOffWh) else 0f,
-            backgroundEnergyWh = if (idxBgWh >= 0) c.getFloat(idxBgWh) else 0f,
+            id = if (indices.idxId >= 0) c.getLong(indices.idxId) else 0L,
+            recordTime = if (indices.idxTime >= 0) c.getString(indices.idxTime) ?: "" else "",
+            levelPercent = if (indices.idxLvl >= 0) c.getInt(indices.idxLvl) else 0,
+            voltageVolts = if (indices.idxVolt >= 0) c.getFloat(indices.idxVolt) else 0f,
+            temperature = if (indices.idxTemp >= 0) c.getFloat(indices.idxTemp) else 0f,
+            energyWh = if (indices.idxWh >= 0) c.getFloat(indices.idxWh) else 0f,
+            isCharging = if (indices.idxChg >= 0) c.getInt(indices.idxChg) == 1 else false,
+            avgPowerWatts = if (indices.idxAvgPwr >= 0) c.getFloat(indices.idxAvgPwr) else 0f,
+            screenOnPowerWatts = if (indices.idxOnPwr >= 0) c.getFloat(indices.idxOnPwr) else 0f,
+            screenOffPowerWatts = if (indices.idxOffPwr >= 0) c.getFloat(indices.idxOffPwr) else 0f,
+            screenOnDurationText = if (indices.idxOnDur >= 0) c.getString(indices.idxOnDur) ?: "" else "",
+            screenOffDurationText = if (indices.idxOffDur >= 0) c.getString(indices.idxOffDur) ?: "" else "",
+            totalDurationText = if (indices.idxTotDur >= 0) c.getString(indices.idxTotDur) ?: "" else "",
+            remainingScreenOnText = if (indices.idxRemOn >= 0) c.getString(indices.idxRemOn) ?: "" else "",
+            remainingCompositeText = if (indices.idxRemComp >= 0) c.getString(indices.idxRemComp) ?: "" else "",
+            remainingScreenOffText = if (indices.idxRemOff >= 0) c.getString(indices.idxRemOff) ?: "" else "",
+            isShizukuRealData = if (indices.idxShizuku >= 0) c.getInt(indices.idxShizuku) == 1 else false,
+            appCount = if (indices.idxAppCnt >= 0) c.getInt(indices.idxAppCnt) else 0,
+            trendPointsJson = if (indices.idxPts >= 0) c.getString(indices.idxPts) ?: "[]" else "[]",
+            appListJson = if (indices.idxApps >= 0) c.getString(indices.idxApps) ?: "[]" else "[]",
+            backgroundPowerWatts = if (indices.idxBgPwr >= 0) c.getFloat(indices.idxBgPwr) else 0f,
+            backgroundDurationText = if (indices.idxBgDur >= 0) c.getString(indices.idxBgDur) ?: "" else "",
+            remainingBackgroundText = if (indices.idxRemBg >= 0) c.getString(indices.idxRemBg) ?: "" else "",
+            screenOnEnergyWh = if (indices.idxOnWh >= 0) c.getFloat(indices.idxOnWh) else 0f,
+            totalEnergyWh = if (indices.idxTotWh >= 0) c.getFloat(indices.idxTotWh) else 0f,
+            screenOffEnergyWh = if (indices.idxOffWh >= 0) c.getFloat(indices.idxOffWh) else 0f,
+            backgroundEnergyWh = if (indices.idxBgWh >= 0) c.getFloat(indices.idxBgWh) else 0f,
+            isCompleted = if (indices.idxCompleted >= 0) c.getInt(indices.idxCompleted) == 1 else true,
+            lastCheckpointTime = if (indices.idxCheckpoint >= 0) c.getLong(indices.idxCheckpoint) else 0L,
+            screenOffAwakeEnergyWh = if (indices.idxAwakeWh >= 0) c.getFloat(indices.idxAwakeWh) else 0f,
+            screenOffDeepSleepEnergyWh = if (indices.idxSleepWh >= 0) c.getFloat(indices.idxSleepWh) else 0f,
+            screenOffAwakeDurationMs = if (indices.idxAwakeDur >= 0) c.getLong(indices.idxAwakeDur) else 0L,
+            screenOffDeepSleepDurationMs = if (indices.idxSleepDur >= 0) c.getLong(indices.idxSleepDur) else 0L,
+            screenOffAwakeDrainMah = if (indices.idxAwakeMah >= 0) c.getFloat(indices.idxAwakeMah) else 0f,
+            screenOffDeepSleepDrainMah = if (indices.idxSleepMah >= 0) c.getFloat(indices.idxSleepMah) else 0f,
+            isScreenOffDecomposedAvailable = if (indices.idxDecomposed >= 0) c.getInt(indices.idxDecomposed) == 1 else true
+        )
+    }
             isCompleted = if (idxCompleted >= 0) c.getInt(idxCompleted) == 1 else true,
             lastCheckpointTime = if (idxCheckpoint >= 0) c.getLong(idxCheckpoint) else 0L,
             screenOffAwakeEnergyWh = if (idxAwakeWh >= 0) c.getFloat(idxAwakeWh) else 0f,

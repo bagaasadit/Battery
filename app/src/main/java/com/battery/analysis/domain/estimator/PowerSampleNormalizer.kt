@@ -168,7 +168,7 @@ class PowerSampleNormalizer {
 
             val pwr1 = p1.powerWatts.toDouble()
             val pwr2 = p2.powerWatts.toDouble()
-            val pAvg = if (pwr1 > 0.0 && pwr2 > 0.0) (pwr1 + pwr2) / 2.0 else max(pwr1, pwr2)
+            val pAvg = (pwr1.coerceAtLeast(0.0) + pwr2.coerceAtLeast(0.0)) / 2.0
             if (pAvg <= 0.0) continue
 
             val dE = pAvg * (dt.toDouble() / 3600000.0)

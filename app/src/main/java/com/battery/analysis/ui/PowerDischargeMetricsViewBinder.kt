@@ -532,39 +532,42 @@ object PowerDischargeMetricsViewBinder {
         return when (rowType) {
             BatteryEnergyCalculator.ROW_SCREEN_ON -> {
                 val win = rollingBuffer?.extractRollingScreenOnWindow(7200_000L)
-                val w = win?.avgPowerWatts?.takeIf { it > 0f } ?: overview?.screenOnPowerWatts?.takeIf { it > 0f } ?: 0f
+                val w = (win?.avgPowerWatts?.takeIf { it in 0.05f..25.0f } ?: overview?.screenOnPowerWatts?.takeIf { it in 0.05f..25.0f } ?: 0f)
                 val dur = win?.effectiveDurationMs?.takeIf { it > 0L } ?: (overview?.screenOnDurationMs ?: 0L)
                 val powerRate = calculateDischargeRatePercentPerHour(w, totalCapacityWh, dur)
-                val sessionPercentRate = if (overview != null && overview.screenOnPercent > 0f && overview.screenOnDurationMs > 0L) {
+                val sessionPercentRate = if (overview != null && overview.screenOnPercent > 0f && (overview.screenOnDurationMs >= 60_000L)) {
                     val hrs = overview.screenOnDurationMs / 3600000.0f
-                    if (hrs > 0.05f) overview.screenOnPercent / hrs else null
+                    if (hrs > 0f) (overview.screenOnPercent / hrs).takeIf { it in 0.1f..100.0f } else null
                 } else null
-                powerRate ?: win?.dischargeRatePercentPerHour ?: sessionPercentRate
+                val effective = powerRate ?: win?.dischargeRatePercentPerHour ?: sessionPercentRate
+                effective?.takeIf { it in 0.01f..100.0f }
             }
             BatteryEnergyCalculator.ROW_SCREEN_OFF -> {
                 // 升级为 12 小时（43200_000L）大跨度切片，完整覆盖一整夜深度睡眠底噪与半天长待机周期
                 val win = rollingBuffer?.extractRollingScreenOffWindow(43200_000L, baselineSleepWatts = offLowW)
-                val w = win?.avgPowerWatts?.takeIf { it > 0f } ?: overview?.screenOffPowerWatts?.takeIf { it > 0f } ?: 0f
+                val w = (win?.avgPowerWatts?.takeIf { it in 0.01f..25.0f } ?: overview?.screenOffPowerWatts?.takeIf { it in 0.01f..25.0f } ?: 0f)
                 val dur = win?.effectiveDurationMs?.takeIf { it > 0L } ?: (overview?.screenOffDurationMs ?: 0L)
                 val powerRate = calculateDischargeRatePercentPerHour(w, totalCapacityWh, dur)
-                val sessionPercentRate = if (overview != null && overview.screenOffPercent > 0f && overview.screenOffDurationMs > 0L) {
+                val sessionPercentRate = if (overview != null && overview.screenOffPercent > 0f && (overview.screenOffDurationMs >= 60_000L)) {
                     val hrs = overview.screenOffDurationMs / 3600000.0f
-                    if (hrs > 0.05f) overview.screenOffPercent / hrs else null
+                    if (hrs > 0f) (overview.screenOffPercent / hrs).takeIf { it in 0.01f..100.0f } else null
                 } else null
-                powerRate ?: win?.dischargeRatePercentPerHour ?: sessionPercentRate
+                val effective = powerRate ?: win?.dischargeRatePercentPerHour ?: sessionPercentRate
+                effective?.takeIf { it in 0.01f..100.0f }
             }
             BatteryEnergyCalculator.ROW_GLOBAL -> {
                 // 升级为 24 小时（86400_000L）宏观昼夜闭环切片，彻底消除早晚相位偏态
                 val win = rollingBuffer?.extractRollingGlobalWindow(86400_000L, baselineSleepWatts = offLowW)
-                val w = win?.avgPowerWatts?.takeIf { it > 0f } ?: overview?.avgPowerWatts?.takeIf { it > 0f } ?: 0f
+                val w = (win?.avgPowerWatts?.takeIf { it in 0.05f..25.0f } ?: overview?.avgPowerWatts?.takeIf { it in 0.05f..25.0f } ?: 0f)
                 val dur = win?.effectiveDurationMs?.takeIf { it > 0L } ?: (overview?.totalDurationMs ?: 0L)
                 val powerRate = calculateDischargeRatePercentPerHour(w, totalCapacityWh, dur)
-                val sessionPercentRate = if (overview != null && overview.totalDurationMs > 0L) {
+                val sessionPercentRate = if (overview != null && (overview.totalDurationMs >= 60_000L)) {
                     val totalPct = overview.screenOnPercent + overview.screenOffPercent
                     val hrs = overview.totalDurationMs / 3600000.0f
-                    if (totalPct > 0f && hrs > 0.05f) totalPct / hrs else null
+                    if (totalPct > 0f && hrs > 0f) (totalPct / hrs).takeIf { it in 0.1f..100.0f } else null
                 } else null
-                powerRate ?: win?.dischargeRatePercentPerHour ?: sessionPercentRate
+                val effective = powerRate ?: win?.dischargeRatePercentPerHour ?: sessionPercentRate
+                effective?.takeIf { it in 0.01f..100.0f }
             }
             else -> null
         }
@@ -589,44 +592,45 @@ object PowerDischargeMetricsViewBinder {
         return when (rowType) {
             BatteryEnergyCalculator.ROW_SCREEN_ON -> {
                 val dur = overview.screenOnDurationMs
-                val w = overview.screenOnPowerWatts.takeIf { it > 0f }
+                val w = overview.screenOnPowerWatts.takeIf { it in 0.05f..25.0f }
                 val powerRate = if (w != null && totalCapacityWh != null && totalCapacityWh > 0f) {
                     calculateDischargeRatePercentPerHour(w, totalCapacityWh, dur)
                 } else null
-                val sessionPercentRate = if (overview.screenOnPercent > 0f && dur > 0L) {
+                // 严禁在 60 秒微小时长内由离散百分比推算放电速度，避免除零暴涨至数万 %/h
+                val sessionPercentRate = if (dur >= 60_000L && overview.screenOnPercent > 0f) {
                     val hrs = dur / 3600000.0f
-                    if (hrs > 0.005f) overview.screenOnPercent / hrs else null
+                    if (hrs > 0f) (overview.screenOnPercent / hrs).takeIf { it in 0.1f..100.0f } else null
                 } else null
-                val effectiveRate = powerRate ?: sessionPercentRate
+                val effectiveRate = (powerRate ?: sessionPercentRate)?.takeIf { it in 0.01f..100.0f }
                 val effectiveDur = if (effectiveRate != null && dur > 0L) dur else null
                 Pair(effectiveRate, effectiveDur)
             }
             BatteryEnergyCalculator.ROW_SCREEN_OFF -> {
                 val dur = overview.screenOffDurationMs
-                val w = overview.screenOffPowerWatts.takeIf { it > 0f }
+                val w = overview.screenOffPowerWatts.takeIf { it in 0.01f..25.0f }
                 val powerRate = if (w != null && totalCapacityWh != null && totalCapacityWh > 0f) {
                     calculateDischargeRatePercentPerHour(w, totalCapacityWh, dur)
                 } else null
-                val sessionPercentRate = if (overview.screenOffPercent > 0f && dur > 0L) {
+                val sessionPercentRate = if (dur >= 60_000L && overview.screenOffPercent > 0f) {
                     val hrs = dur / 3600000.0f
-                    if (hrs > 0.005f) overview.screenOffPercent / hrs else null
+                    if (hrs > 0f) (overview.screenOffPercent / hrs).takeIf { it in 0.01f..100.0f } else null
                 } else null
-                val effectiveRate = powerRate ?: sessionPercentRate
+                val effectiveRate = (powerRate ?: sessionPercentRate)?.takeIf { it in 0.01f..100.0f }
                 val effectiveDur = if (effectiveRate != null && dur > 0L) dur else null
                 Pair(effectiveRate, effectiveDur)
             }
             BatteryEnergyCalculator.ROW_GLOBAL -> {
                 val dur = overview.totalDurationMs
-                val w = overview.avgPowerWatts.takeIf { it > 0f }
+                val w = overview.avgPowerWatts.takeIf { it in 0.05f..25.0f }
                 val totalPct = overview.screenOnPercent + overview.screenOffPercent
                 val powerRate = if (w != null && totalCapacityWh != null && totalCapacityWh > 0f) {
                     calculateDischargeRatePercentPerHour(w, totalCapacityWh, dur)
                 } else null
-                val sessionPercentRate = if (totalPct > 0f && dur > 0L) {
+                val sessionPercentRate = if (dur >= 60_000L && totalPct > 0f) {
                     val hrs = dur / 3600000.0f
-                    if (hrs > 0.005f) totalPct / hrs else null
+                    if (hrs > 0f) (totalPct / hrs).takeIf { it in 0.1f..100.0f } else null
                 } else null
-                val effectiveRate = powerRate ?: sessionPercentRate
+                val effectiveRate = (powerRate ?: sessionPercentRate)?.takeIf { it in 0.01f..100.0f }
                 val effectiveDur = if (effectiveRate != null && dur > 0L) dur else null
                 Pair(effectiveRate, effectiveDur)
             }
@@ -655,11 +659,11 @@ object PowerDischargeMetricsViewBinder {
         if (totalCapacityWh == null || !totalCapacityWh.isFinite() || totalCapacityWh <= 0f) {
             return null
         }
-        if (!powerWatts.isFinite() || powerWatts <= 0f || durationMs <= 0L) {
+        if (!powerWatts.isFinite() || powerWatts <= 0f || durationMs <= 0L || powerWatts > 25.0f) {
             return null
         }
         val rate = (powerWatts / totalCapacityWh) * 100f
-        return if (rate.isFinite() && rate > 0f) rate else null
+        return if (rate.isFinite() && rate in 0.01f..100.0f) rate else null
     }
 
     /**
@@ -669,7 +673,7 @@ object PowerDischargeMetricsViewBinder {
      * @return 格式化后的富文本对象 [CharSequence]
      */
     fun formatDischargeRateSpannable(rate: Float?): CharSequence {
-        if (rate == null || rate <= 0f) {
+        if (rate == null || rate <= 0f || !rate.isFinite() || rate > 100.0f) {
             return "--"
         }
         val numberStr = String.format(Locale.getDefault(), "%.1f", rate)

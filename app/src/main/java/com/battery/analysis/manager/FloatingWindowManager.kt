@@ -59,6 +59,11 @@ object FloatingWindowManager {
     const val KEY_POS_PERCENT_X = "pref_floating_pos_percent_x"
     const val KEY_POS_PERCENT_Y = "pref_floating_pos_percent_y"
 
+    @Volatile private var cachedFloatingEnabled: Boolean? = null
+    @Volatile private var cachedShowPower: Boolean? = null
+    @Volatile private var cachedShowTemp: Boolean? = null
+    @Volatile private var cachedShowUnit: Boolean? = null
+
     const val DEFAULT_FONT_SIZE = 11
     const val MIN_FONT_SIZE = 5
     const val MAX_FONT_SIZE = 20
@@ -195,13 +200,15 @@ object FloatingWindowManager {
     }
 
     /**
-     * 查询是否开启了悬浮窗显示。
+     * 查询是否开启了悬浮窗显示（内存直读，0 IPC 开销）。
      *
      * @param context 运行上下文
      * @return 若已开启返回 true，未开启返回 false
      */
     fun isFloatingEnabled(context: Context): Boolean {
-        return getPrefs(context).getBoolean(KEY_ENABLED, false)
+        return cachedFloatingEnabled ?: getPrefs(context).getBoolean(KEY_ENABLED, false).also {
+            cachedFloatingEnabled = it
+        }
     }
 
     /**
@@ -213,6 +220,7 @@ object FloatingWindowManager {
      * @param enabled 是否开启
      */
     fun setFloatingEnabled(context: Context, enabled: Boolean) {
+        cachedFloatingEnabled = enabled
         getPrefs(context).edit().putBoolean(KEY_ENABLED, enabled).apply()
         if (enabled) {
             show(context)
@@ -228,13 +236,15 @@ object FloatingWindowManager {
     }
 
     /**
-     * 查询悬浮窗是否开启实时功率显示。
+     * 查询悬浮窗是否开启实时功率显示（内存直读）。
      *
      * @param context 运行上下文
      * @return 若开启返回 true，未开启返回 false（默认 true）
      */
     fun isShowPower(context: Context): Boolean {
-        return getPrefs(context).getBoolean(KEY_SHOW_POWER, true)
+        return cachedShowPower ?: getPrefs(context).getBoolean(KEY_SHOW_POWER, true).also {
+            cachedShowPower = it
+        }
     }
 
     /**
@@ -244,18 +254,21 @@ object FloatingWindowManager {
      * @param show 是否显示实时功率
      */
     fun setShowPower(context: Context, show: Boolean) {
+        cachedShowPower = show
         getPrefs(context).edit().putBoolean(KEY_SHOW_POWER, show).apply()
         updateViewContent(context)
     }
 
     /**
-     * 查询悬浮窗是否开启实时温度显示。
+     * 查询悬浮窗是否开启实时温度显示（内存直读）。
      *
      * @param context 运行上下文
      * @return 若开启返回 true，未开启返回 false（默认 true）
      */
     fun isShowTemp(context: Context): Boolean {
-        return getPrefs(context).getBoolean(KEY_SHOW_TEMP, true)
+        return cachedShowTemp ?: getPrefs(context).getBoolean(KEY_SHOW_TEMP, true).also {
+            cachedShowTemp = it
+        }
     }
 
     /**
@@ -265,6 +278,7 @@ object FloatingWindowManager {
      * @param show 是否显示实时温度
      */
     fun setShowTemp(context: Context, show: Boolean) {
+        cachedShowTemp = show
         getPrefs(context).edit().putBoolean(KEY_SHOW_TEMP, show).apply()
         updateViewContent(context)
     }
@@ -659,7 +673,9 @@ object FloatingWindowManager {
      * @return 若开启显示单位返回 true，未开启返回 false（默认 true）
      */
     fun isShowUnit(context: Context): Boolean {
-        return getPrefs(context).getBoolean(KEY_SHOW_UNIT, true)
+        return cachedShowUnit ?: getPrefs(context).getBoolean(KEY_SHOW_UNIT, true).also {
+            cachedShowUnit = it
+        }
     }
 
     /**
@@ -669,6 +685,7 @@ object FloatingWindowManager {
      * @param show 是否显示单位
      */
     fun setShowUnit(context: Context, show: Boolean) {
+        cachedShowUnit = show
         getPrefs(context).edit().putBoolean(KEY_SHOW_UNIT, show).apply()
         updatePositionAndAppearance(context)
     }

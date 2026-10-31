@@ -14,6 +14,14 @@ import com.battery.analysis.model.HistoryRecord
  */
 class HistoryDbHelper(context: Context) : SQLiteOpenHelper(context, DATABASE_NAME, null, DATABASE_VERSION) {
 
+    override fun onConfigure(db: SQLiteDatabase) {
+        super.onConfigure(db)
+        try {
+            db.enableWriteAheadLogging()
+            db.execSQL("PRAGMA synchronous = NORMAL")
+        } catch (_: Exception) {}
+    }
+
     /**
      * 数据库初次创建时的表结构初始化。
      *

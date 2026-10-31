@@ -306,7 +306,8 @@ class BatteryUnplugReceiver : BroadcastReceiver() {
         return try {
             val pm = context.getSystemService(Context.POWER_SERVICE) as? PowerManager
             pm?.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, tag)?.also { wl ->
-                // 30 秒最大超时，防止极端情况下 WakeLock 泄漏导致设备无法休眠
+                wl.setReferenceCounted(false)
+                // 10 秒最大超时，防止极端情况下 WakeLock 泄漏导致设备无法进入 Deep Sleep
                 wl.acquire(WAKELOCK_TIMEOUT_MS)
             }
         } catch (e: Exception) {
@@ -319,8 +320,8 @@ class BatteryUnplugReceiver : BroadcastReceiver() {
         /** 防抖间隔：3 秒内重复广播直接忽略，避免物理抖动产生重复记录 */
         private const val DEBOUNCE_INTERVAL_MS = 3000L
 
-        /** WakeLock 最大持锁超时：30 秒，足够完成所有数据库 IO */
-        private const val WAKELOCK_TIMEOUT_MS = 30_000L
+        /** WakeLock 最大持锁超时：10 秒，足够完成轻量异步 IO 并快速释放休眠锁 */
+        private const val WAKELOCK_TIMEOUT_MS = 10_000L
 
         private var lastRecordedTimestamp = 0L
         private var lastConnectedTimestamp = 0L

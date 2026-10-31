@@ -119,6 +119,15 @@ class PowerUsageManager private constructor(private val context: Context) {
         /** 自动触发放电 Checkpoint 检查点的电量下降百分比阈值（默认 5%） */
         const val CHECKPOINT_LEVEL_DROP_THRESHOLD = 5
 
+        /** 微小时长除零与阶梯跳变防护最小安全时长阈值（单位：毫秒，60 秒内严禁使用百分比/库仑计粗粒度差值除以时间） */
+        const val MIN_DISCHARGE_SANITY_DURATION_MS = 60_000L
+
+        /** 智能手机物理放电功率安全上限（单位：瓦特 W，超过 25.0W 判定为时钟跳变或状态失步，触发瞬时采样回退） */
+        const val MAX_PHYSICAL_DISCHARGE_WATTS = 25.0f
+
+        /** 智能手机每小时物理放电速率安全上限（单位：%/h，超过 100.0%/h 判定为微小时间除数异常） */
+        const val MAX_PHYSICAL_DISCHARGE_RATE_PCT_PER_HOUR = 100.0f
+
         @Volatile
         private var instance: PowerUsageManager? = null
 
@@ -609,6 +618,9 @@ class PowerUsageManager private constructor(private val context: Context) {
             nominalVoltageVolts: Float,
             minScreenOffEnergyWh: Float = 0f
         ): DualAnchorPowerStats {
+            val isMicroDuration = dischargeHours < (MIN_DISCHARGE_SANITY_DURATION_MS / 3600_000f)
+            // 60秒微小时长保护：前60秒绝对禁止采信百分比/库仑计粗粒度跳变折算的物理总能量，只采信纯硬件高频微积分
+            val safePhysicalTotalEnergyWh = if (isMicroDuration) 0f else physicalTotalEnergyWh
             var onEnergyWh = intOnEnergyWh
             val offEnergyWh: Float
             val realTotalEnergyWh: Float
@@ -616,8 +628,8 @@ class PowerUsageManager private constructor(private val context: Context) {
             if (screenOffHours <= 0f || screenOffMs < 1000L) {
                 // 全亮屏工况：息屏能耗与功耗严格为 0，亮屏能耗对齐整机总能耗
                 offEnergyWh = 0f
-                realTotalEnergyWh = if (physicalTotalEnergyWh > onEnergyWh) {
-                    physicalTotalEnergyWh
+                realTotalEnergyWh = if (safePhysicalTotalEnergyWh > onEnergyWh) {
+                    safePhysicalTotalEnergyWh
                 } else {
                     if (intTotalEnergyWh > 0f) intTotalEnergyWh else onEnergyWh
                 }
@@ -625,8 +637,8 @@ class PowerUsageManager private constructor(private val context: Context) {
             } else if (screenOnHours <= 0f) {
                 // 全息屏工况：亮屏能耗严格为 0，息屏能耗对齐整机总能耗
                 onEnergyWh = 0f
-                offEnergyWh = if (physicalTotalEnergyWh > 0f) {
-                    maxOf(physicalTotalEnergyWh, intOffEnergyWh, minScreenOffEnergyWh)
+                offEnergyWh = if (safePhysicalTotalEnergyWh > 0f) {
+                    maxOf(safePhysicalTotalEnergyWh, intOffEnergyWh, minScreenOffEnergyWh)
                 } else {
                     val candidate = if (intTotalEnergyWh > 0f) intTotalEnergyWh else intOffEnergyWh
                     maxOf(candidate, minScreenOffEnergyWh)
@@ -663,28 +675,50 @@ class PowerUsageManager private constructor(private val context: Context) {
                 realTotalEnergyWh = onEnergyWh + offEnergyWh
             }
 
-            val screenOnWatts = if (screenOnHours > 0f && onEnergyWh > 0f) {
+            val rawScreenOnWatts = if (screenOnHours > 0f && onEnergyWh > 0f) {
                 onEnergyWh / screenOnHours
             } else if (intOnPowerWatts > 0f) {
                 intOnPowerWatts
             } else {
                 0f
             }
+            // 物理安全上限约束 (<= 25.0W)：若因时钟跳跃异常暴涨，自动回退到瞬时硬件微积分采样功耗
+            val screenOnWatts = if (rawScreenOnWatts.isFinite() && rawScreenOnWatts <= MAX_PHYSICAL_DISCHARGE_WATTS) {
+                rawScreenOnWatts
+            } else if (intOnPowerWatts in 0.01f..MAX_PHYSICAL_DISCHARGE_WATTS) {
+                intOnPowerWatts
+            } else {
+                0f
+            }
 
-            val screenOffWatts = if (screenOffHours > 0f && offEnergyWh > 0f) {
+            val rawScreenOffWatts = if (screenOffHours > 0f && offEnergyWh > 0f) {
                 offEnergyWh / screenOffHours
             } else if (intOffPowerWatts > 0f) {
                 intOffPowerWatts
             } else {
                 0f
             }
+            val screenOffWatts = if (rawScreenOffWatts.isFinite() && rawScreenOffWatts <= MAX_PHYSICAL_DISCHARGE_WATTS) {
+                rawScreenOffWatts
+            } else if (intOffPowerWatts in 0.01f..MAX_PHYSICAL_DISCHARGE_WATTS) {
+                intOffPowerWatts
+            } else {
+                0f
+            }
 
-            val avgWatts = if (dischargeHours > 0f && realTotalEnergyWh > 0f) {
+            val rawAvgWatts = if (dischargeHours > 0f && realTotalEnergyWh > 0f) {
                 realTotalEnergyWh / dischargeHours
             } else if (intTotalPowerWatts > 0f) {
                 intTotalPowerWatts
             } else {
                 0f
+            }
+            val avgWatts = if (rawAvgWatts.isFinite() && rawAvgWatts <= MAX_PHYSICAL_DISCHARGE_WATTS) {
+                rawAvgWatts
+            } else if (intTotalPowerWatts in 0.01f..MAX_PHYSICAL_DISCHARGE_WATTS) {
+                intTotalPowerWatts
+            } else {
+                screenOnWatts
             }
 
             val realDischargedMah = if (nominalVoltageVolts > 0f) {
@@ -3043,17 +3077,20 @@ class PowerUsageManager private constructor(private val context: Context) {
         val now = System.currentTimeMillis()
         val level = currentLevel ?: batteryStatus.levelPercent
 
-        // 1. 若非强制触发，检查 30 秒最小时间防抖窗口
-        if (!force && (now - lastDischargeCheckpointTime) < MIN_CHECKPOINT_INTERVAL_MS) {
+        // 1. 若非强制触发，检查防抖窗口（至少 30 秒）
+        if (!force && (now - lastDischargeCheckpointTime) < 30_000L) {
             return
         }
 
-        // 2. 若传入了电量，检查是否达到 5% 掉电阈值（仅在非强制模式下检查）
+        // 2. 若传入了电量，检查是否达到触发阈值：亮屏 5%，息屏 1%，或时间满 15 分钟（900_000L）
         if (!force && lastDischargeCheckpointLevel > 0 && level > 0) {
             val drop = lastDischargeCheckpointLevel - level
             val timeElapsed = now - lastDischargeCheckpointTime
-            // 既未掉电达到 5%，时间也未满 15 分钟（900_000L），跳过写入
-            if (drop < CHECKPOINT_LEVEL_DROP_THRESHOLD && timeElapsed < 15 * 60_000L) {
+            val isInteractive = try {
+                (context.getSystemService(Context.POWER_SERVICE) as? android.os.PowerManager)?.isInteractive ?: true
+            } catch (_: Exception) { true }
+            val requiredDrop = if (isInteractive) CHECKPOINT_LEVEL_DROP_THRESHOLD else 1
+            if (drop < requiredDrop && timeElapsed < 15 * 60_000L) {
                 return
             }
         }
@@ -3200,7 +3237,7 @@ class PowerUsageManager private constructor(private val context: Context) {
         ensureDischargeSamplesLoaded()
 
         val chargingDb = com.battery.analysis.db.ChargingHistoryDbHelper.getInstance(context)
-        val latestCharge = chargingDb.getAllRecords().firstOrNull() ?: return false
+        val latestCharge = chargingDb.getLatestRecord() ?: return false
         val chargeEndTs = latestCharge.endTimestamp
         val chargeStartTs = latestCharge.startTimestamp
         if (chargeEndTs <= 0L) return false
@@ -4050,7 +4087,7 @@ class PowerUsageManager private constructor(private val context: Context) {
                     .filter { it.first in (startTs - 30_000L)..now }
                     .maxOfOrNull { it.second }
 
-                val startLevel = when {
+                var startLevel = when {
                     isDetectedUnplugInCurrentPeriod -> {
                         stats.detectedUnplugLevel!!
                     }
@@ -4065,7 +4102,21 @@ class PowerUsageManager private constructor(private val context: Context) {
                     }
                 }
                 val currentLevel = batterySnapshot.levelPercent
-                val dropPercent = (startLevel - currentLevel).coerceAtLeast(0)
+                var dropPercent = (startLevel - currentLevel).coerceAtLeast(0)
+
+                // 核心安全防护：若处于拔电/重置后的 60 秒微小时长内且检测到异常掉电 (>1%)，
+                // 必定属于时钟或跨周期电量状态失步，自动纠正基准锚点，杜绝 10% 异常除零尖峰
+                if (durationMs < MIN_DISCHARGE_SANITY_DURATION_MS && dropPercent > 1) {
+                    startLevel = currentLevel
+                    effectiveUnplugLevel = currentLevel
+                    effectiveUnplugTime = now
+                    dropPercent = 0
+                    prefs.edit()
+                        .putInt(PREF_KEY_LAST_UNPLUG_LEVEL, currentLevel)
+                        .putLong(PREF_KEY_LAST_UNPLUG_TIME, now)
+                        .apply()
+                    saveUnplugEnergy(currentLevel)
+                }
 
                 // 1. 优先使用系统 dumpsys batterystats 权威连续放电量 computedDrainMah（高精度浮点），
                 // 杜绝整数百分比跳变导致的短期虚假功耗尖峰（如 1% 掉电除以微小时长导致虚高 10W+）；
@@ -4073,11 +4124,16 @@ class PowerUsageManager private constructor(private val context: Context) {
                 val bm = context.getSystemService(Context.BATTERY_SERVICE) as? BatteryManager
                 val currentCounterUah = bm?.getIntProperty(BatteryManager.BATTERY_PROPERTY_CHARGE_COUNTER) ?: 0
                 val lastCounterUah = prefs.getInt(PREF_KEY_LAST_UNPLUG_CHARGE_COUNTER, 0)
-                val hwDischargedMah = if (lastCounterUah > 0 && currentCounterUah > 0 && lastCounterUah >= currentCounterUah) {
+                if (durationMs < MIN_DISCHARGE_SANITY_DURATION_MS && currentCounterUah > 0 && (lastCounterUah <= 0 || lastCounterUah < currentCounterUah || dropPercent == 0)) {
+                    prefs.edit().putInt(PREF_KEY_LAST_UNPLUG_CHARGE_COUNTER, currentCounterUah).apply()
+                }
+                val isMicroDuration = durationMs < MIN_DISCHARGE_SANITY_DURATION_MS
+                val rawHwDischargedMah = if (lastCounterUah > 0 && currentCounterUah > 0 && lastCounterUah >= currentCounterUah) {
                     (lastCounterUah - currentCounterUah) / 1000f
                 } else {
                     0f
                 }
+                val hwDischargedMah = if (isMicroDuration) 0f else rawHwDischargedMah
 
                 // 物理守恒底线校验：整机放电量必不小于各应用实耗电量与屏幕硬件耗电量之和（整体大于等于部分之和）
                 // 核心防护：若某些应用包含跨周期历史累积时长（如后台 13 小时），在当前放电周期（如 18 秒）内，
@@ -4093,8 +4149,8 @@ class PowerUsageManager private constructor(private val context: Context) {
                 val appEnergyMah = if (currentPeriodAppEnergyWh > 0f) (currentPeriodAppEnergyWh * 1000f / nominalVoltageVolts) else 0f
                 val minPhysicalMah = appEnergyMah + stats.screenDrainMah
 
-                // 真实放电量计算
-                val smoothedDropMah = if (dropPercent > 0) {
+                // 真实放电量计算：微小时长（<60秒）禁止采用离散百分比跳变推算放电量
+                val smoothedDropMah = if (dropPercent > 0 && !isMicroDuration) {
                     effectiveCapacity * (dropPercent / 100f)
                 } else {
                     0f
@@ -4102,7 +4158,7 @@ class PowerUsageManager private constructor(private val context: Context) {
 
                 // 物理守恒基础：硬件芯片库仑计差值与纯应用前台实耗电量，绝不采用 dumpsys computedDrainMah 软件估算
                 val impliedTotalWatts = if (dischargeHours > 0f) (hwDischargedMah * nominalVoltageVolts / 1000f) / dischargeHours else 0f
-                val validHwMah = if (hwDischargedMah > 0f) {
+                val validHwMah = if (hwDischargedMah > 0f && !isMicroDuration) {
                     if (dropPercent > 0 && hwDischargedMah < (smoothedDropMah * 0.3f)) {
                         // 硬件库仑计处于离散步进滞后状态（例如掉电 1% 约 50mAh，库仑计差值却只有微小的 0.1mAh），采纳真实掉电量
                         0f
@@ -4117,10 +4173,10 @@ class PowerUsageManager private constructor(private val context: Context) {
                 }
                 val physicalDrainMah = when {
                     validHwMah > 0f -> validHwMah
-                    dropPercent > 0 -> maxOf(smoothedDropMah, minPhysicalMah)
+                    dropPercent > 0 && !isMicroDuration -> maxOf(smoothedDropMah, minPhysicalMah)
                     else -> 0f
                 }
-                val physicalTotalEnergyWh = (physicalDrainMah * nominalVoltageVolts) / 1000f
+                val physicalTotalEnergyWh = if (isMicroDuration) 0f else (physicalDrainMah * nominalVoltageVolts) / 1000f
 
                 // 硬件时序实时物理微积分：优先使用 In-Flight 常驻累加器（1秒级高频瞬时真实积分，不受图表抽稀影响）
                 val acc = getDischargeAccumulator()
@@ -4255,16 +4311,27 @@ class PowerUsageManager private constructor(private val context: Context) {
                         onEnergyWh = if (intOnEnergyWh > 0f) intOnEnergyWh else (physicalTotalEnergyWh - offEnergyWh).coerceAtLeast(0f)
                     }
                     realTotalEnergyWh = onEnergyWh + offEnergyWh
-                    avgWatts = if (dischargeHours > 0f) realTotalEnergyWh / dischargeHours else 0f
-                    screenOnWatts = if (screenOnHours > 0f) onEnergyWh / screenOnHours else avgWatts
-                    screenOffWatts = if (screenOffHours > 0f) offEnergyWh / screenOffHours else 0f
+                    val rawAvg = if (dischargeHours > 0f) realTotalEnergyWh / dischargeHours else 0f
+                    val rawOn = if (screenOnHours > 0f) onEnergyWh / screenOnHours else rawAvg
+                    val rawOff = if (screenOffHours > 0f) offEnergyWh / screenOffHours else 0f
+
+                    avgWatts = if (rawAvg.isFinite() && rawAvg <= MAX_PHYSICAL_DISCHARGE_WATTS) rawAvg else 0f
+                    screenOnWatts = if (rawOn.isFinite() && rawOn <= MAX_PHYSICAL_DISCHARGE_WATTS) rawOn else avgWatts
+                    screenOffWatts = if (rawOff.isFinite() && rawOff <= MAX_PHYSICAL_DISCHARGE_WATTS) rawOff else 0f
 
                     // confirmedScreenOffEnergyWh 统一在后置自底向上物理合成与分解校验完成后更新，防止未校验的 dumpsys 残差提早污染单调性基准
                 } else {
-                    // 3. 既无硬件采样点且系统无任何掉电量（如刚拔掉充电器数秒内）：真实数值均为 0
+                    // 3. 刚拔掉充电器或重置后的微小时长（<60秒）：采用硬件瞬时采样真值，杜绝显示 0 或天价异常数值
+                    val hwInstant = SysfsBatterySampler.sampleHardwareDischarge(
+                        context = context,
+                        fallbackVoltageVolts = batterySnapshot.voltageVolts,
+                        fallbackTempCelsius = batterySnapshot.temperature,
+                        allowProcessFork = false
+                    )
+                    val instantWatt = hwInstant?.powerWatts?.takeIf { it in 0.05f..MAX_PHYSICAL_DISCHARGE_WATTS } ?: 0f
                     realTotalEnergyWh = 0f
-                    avgWatts = 0f
-                    screenOnWatts = 0f
+                    avgWatts = instantWatt
+                    screenOnWatts = if (screenOnMs > 0L || screenOffMs <= 0L) instantWatt else 0f
                     screenOffWatts = 0f
                     onEnergyWh = 0f
                     offEnergyWh = 0f
@@ -4461,9 +4528,15 @@ class PowerUsageManager private constructor(private val context: Context) {
                     confirmedScreenOffEnergyWh = maxOf(confirmedScreenOffEnergyWh, finalOffEnergyWh)
                     confirmedScreenOffDurationMs = maxOf(confirmedScreenOffDurationMs, screenOffMs)
                 }
-                val finalScreenOffWatts = if (screenOffHours > 0f && finalOffEnergyWh > 0f) finalOffEnergyWh / screenOffHours else screenOffWatts
+                val rawFinalScreenOffWatts = if (screenOffHours > 0f && finalOffEnergyWh > 0f) finalOffEnergyWh / screenOffHours else screenOffWatts
+                val finalScreenOffWatts = if (rawFinalScreenOffWatts.isFinite() && rawFinalScreenOffWatts <= MAX_PHYSICAL_DISCHARGE_WATTS) {
+                    rawFinalScreenOffWatts
+                } else screenOffWatts.coerceAtMost(MAX_PHYSICAL_DISCHARGE_WATTS)
                 val finalRealTotalEnergyWh = onEnergyWh + finalOffEnergyWh
-                val finalAvgWatts = if (dischargeHours > 0f && finalRealTotalEnergyWh > 0f) finalRealTotalEnergyWh / dischargeHours else avgWatts
+                val rawFinalAvgWatts = if (dischargeHours > 0f && finalRealTotalEnergyWh > 0f) finalRealTotalEnergyWh / dischargeHours else avgWatts
+                val finalAvgWatts = if (rawFinalAvgWatts.isFinite() && rawFinalAvgWatts <= MAX_PHYSICAL_DISCHARGE_WATTS) {
+                    rawFinalAvgWatts
+                } else avgWatts.coerceAtMost(MAX_PHYSICAL_DISCHARGE_WATTS)
 
                 val targetCapacityMah = if (stats.capacityMah > 0f) stats.capacityMah else effectiveCapacity
                 val nominalTotalWh = if (targetCapacityMah > 0f && nominalVoltageVolts > 0f) (targetCapacityMah * nominalVoltageVolts / 1000f) else finalRealTotalEnergyWh
@@ -6614,9 +6687,23 @@ class PowerUsageManager private constructor(private val context: Context) {
 
         val effectiveCapacity = getEffectiveDeviceCapacityMah()
         val isUnplugSession = unplugTime > 0L && (now - unplugTime) < 24 * 3600000L
-        val unplugLevel = if (isUnplugSession) getLastUnplugLevel().coerceIn(0, 100) else currentLevel
-        val startLevel = if (unplugLevel >= currentLevel) unplugLevel else currentLevel
-        val dropPercent = (startLevel - currentLevel).coerceAtLeast(0)
+        var effectiveUnplugLevel = if (isUnplugSession) getLastUnplugLevel().coerceIn(0, 100) else currentLevel
+        var startLevel = if (effectiveUnplugLevel >= currentLevel) effectiveUnplugLevel else currentLevel
+        var dropPercent = (startLevel - currentLevel).coerceAtLeast(0)
+
+        // 核心安全防护：若处于拔电/重置后的 60 秒微小时长内且检测到异常掉电 (>1%)，
+        // 必定属于时钟或跨周期电量状态失步，自动纠正基准锚点，杜绝 10% 异常除零尖峰
+        if (totalMs < MIN_DISCHARGE_SANITY_DURATION_MS && dropPercent > 1) {
+            startLevel = currentLevel
+            effectiveUnplugLevel = currentLevel
+            dropPercent = 0
+            prefs.edit()
+                .putInt(PREF_KEY_LAST_UNPLUG_LEVEL, currentLevel)
+                .putLong(PREF_KEY_LAST_UNPLUG_TIME, now)
+                .apply()
+            saveUnplugEnergy(currentLevel)
+        }
+
         val dischargeHours = totalMs / 3600000f
         val screenOnHours = screenOnMs / 3600000f
         val screenOffHours = screenOffMs / 3600000f
@@ -6628,13 +6715,18 @@ class PowerUsageManager private constructor(private val context: Context) {
         val bm = context.getSystemService(Context.BATTERY_SERVICE) as? BatteryManager
         val currentCounterUah = bm?.getIntProperty(BatteryManager.BATTERY_PROPERTY_CHARGE_COUNTER) ?: 0
         val lastCounterUah = prefs.getInt(PREF_KEY_LAST_UNPLUG_CHARGE_COUNTER, 0)
-        val hwDischargedMah = if (lastCounterUah > 0 && currentCounterUah > 0 && lastCounterUah >= currentCounterUah) {
+        if (totalMs < MIN_DISCHARGE_SANITY_DURATION_MS && currentCounterUah > 0 && (lastCounterUah <= 0 || lastCounterUah < currentCounterUah || dropPercent == 0)) {
+            prefs.edit().putInt(PREF_KEY_LAST_UNPLUG_CHARGE_COUNTER, currentCounterUah).apply()
+        }
+        val isMicroDuration = totalMs < MIN_DISCHARGE_SANITY_DURATION_MS
+        val rawHwDischargedMah = if (lastCounterUah > 0 && currentCounterUah > 0 && lastCounterUah >= currentCounterUah) {
             (lastCounterUah - currentCounterUah) / 1000f
         } else {
             0f
         }
+        val hwDischargedMah = if (isMicroDuration) 0f else rawHwDischargedMah
 
-        val smoothedDropMah = if (dropPercent > 0) {
+        val smoothedDropMah = if (dropPercent > 0 && !isMicroDuration) {
             effectiveCapacity * (dropPercent / 100f)
         } else {
             0f
@@ -6642,7 +6734,7 @@ class PowerUsageManager private constructor(private val context: Context) {
 
         // 物理电量基础：优先采用硬件芯片库仑计差值，若无则采用掉电百分比折算
         val impliedTotalWatts = if (dischargeHours > 0f) (hwDischargedMah * nominalVoltageVolts / 1000f) / dischargeHours else 0f
-        val validHwMah = if (hwDischargedMah > 0f) {
+        val validHwMah = if (hwDischargedMah > 0f && !isMicroDuration) {
             if (dropPercent > 0 && hwDischargedMah < (smoothedDropMah * 0.3f)) {
                 // 硬件库仑计处于离散步进滞后状态（例如掉电 1% 约 50mAh，库仑计差值却只有微小的 0.1mAh），采纳真实掉电量
                 0f
@@ -6657,10 +6749,10 @@ class PowerUsageManager private constructor(private val context: Context) {
         }
         val physicalDrainMah = when {
             validHwMah > 0f -> validHwMah
-            dropPercent > 0 -> smoothedDropMah
+            dropPercent > 0 && !isMicroDuration -> smoothedDropMah
             else -> 0f
         }
-        val physicalTotalEnergyWh = (physicalDrainMah * nominalVoltageVolts) / 1000f
+        val physicalTotalEnergyWh = if (isMicroDuration) 0f else (physicalDrainMah * nominalVoltageVolts) / 1000f
 
         // 硬件时序实时物理微积分：优先使用 In-Flight 常驻累加器（1秒级高频瞬时真实积分，不受图表抽稀影响）
         val acc = getDischargeAccumulator()
@@ -6785,16 +6877,27 @@ class PowerUsageManager private constructor(private val context: Context) {
                 onEnergyWh = if (intOnEnergyWh > 0f) intOnEnergyWh else (physicalTotalEnergyWh - offEnergyWh).coerceAtLeast(0f)
             }
             realTotalEnergyWh = onEnergyWh + offEnergyWh
-            avgPower = if (dischargeHours > 0f) realTotalEnergyWh / dischargeHours else 0f
-            screenOnPower = if (screenOnHours > 0f) onEnergyWh / screenOnHours else avgPower
-            screenOffPower = if (screenOffHours > 0f) offEnergyWh / screenOffHours else 0f
+            val rawAvg = if (dischargeHours > 0f) realTotalEnergyWh / dischargeHours else 0f
+            val rawOn = if (screenOnHours > 0f) onEnergyWh / screenOnHours else rawAvg
+            val rawOff = if (screenOffHours > 0f) offEnergyWh / screenOffHours else 0f
+
+            avgPower = if (rawAvg.isFinite() && rawAvg <= MAX_PHYSICAL_DISCHARGE_WATTS) rawAvg else 0f
+            screenOnPower = if (rawOn.isFinite() && rawOn <= MAX_PHYSICAL_DISCHARGE_WATTS) rawOn else avgPower
+            screenOffPower = if (rawOff.isFinite() && rawOff <= MAX_PHYSICAL_DISCHARGE_WATTS) rawOff else 0f
 
             // confirmedScreenOffEnergyWh 统一在后置自底向上物理合成与分解校验完成后更新，防止未校验的 dumpsys 残差提早污染单调性基准
         } else {
-            // 3. 既无硬件采样点且系统无任何掉电量（如刚拔掉充电器数秒内）：真实数值均为 0
+            // 3. 刚拔电微小时长（<60秒）：采用瞬时硬件放电采样真值
+            val hwInstant = SysfsBatterySampler.sampleHardwareDischarge(
+                context = context,
+                fallbackVoltageVolts = BatteryEnergyCalculator.DEFAULT_NOMINAL_VOLTAGE_VOLTS,
+                fallbackTempCelsius = 25f,
+                allowProcessFork = false
+            )
+            val instantWatt = hwInstant?.powerWatts?.takeIf { it in 0.05f..MAX_PHYSICAL_DISCHARGE_WATTS } ?: 0f
             realTotalEnergyWh = 0f
-            avgPower = 0f
-            screenOnPower = 0f
+            avgPower = instantWatt
+            screenOnPower = if (screenOnMs > 0L || screenOffMs <= 0L) instantWatt else 0f
             screenOffPower = 0f
             onEnergyWh = 0f
             offEnergyWh = 0f
@@ -6902,9 +7005,15 @@ class PowerUsageManager private constructor(private val context: Context) {
             confirmedScreenOffEnergyWh = maxOf(confirmedScreenOffEnergyWh, finalOffEnergyWh)
             confirmedScreenOffDurationMs = maxOf(confirmedScreenOffDurationMs, screenOffMs)
         }
-        val finalScreenOffWatts = if (screenOffHours > 0f && finalOffEnergyWh > 0f) finalOffEnergyWh / screenOffHours else screenOffPower
+        val rawFinalScreenOffWatts = if (screenOffHours > 0f && finalOffEnergyWh > 0f) finalOffEnergyWh / screenOffHours else screenOffPower
+        val finalScreenOffWatts = if (rawFinalScreenOffWatts.isFinite() && rawFinalScreenOffWatts <= MAX_PHYSICAL_DISCHARGE_WATTS) {
+            rawFinalScreenOffWatts
+        } else screenOffPower.coerceAtMost(MAX_PHYSICAL_DISCHARGE_WATTS)
         val finalRealTotalEnergyWh = onEnergyWh + finalOffEnergyWh
-        val finalAvgWatts = if (dischargeHours > 0f && finalRealTotalEnergyWh > 0f) finalRealTotalEnergyWh / dischargeHours else avgPower
+        val rawFinalAvgWatts = if (dischargeHours > 0f && finalRealTotalEnergyWh > 0f) finalRealTotalEnergyWh / dischargeHours else avgPower
+        val finalAvgWatts = if (rawFinalAvgWatts.isFinite() && rawFinalAvgWatts <= MAX_PHYSICAL_DISCHARGE_WATTS) {
+            rawFinalAvgWatts
+        } else avgPower.coerceAtMost(MAX_PHYSICAL_DISCHARGE_WATTS)
 
         val nominalTotalWh = if (effectiveCapacity > 0f && nominalVoltageVolts > 0f) (effectiveCapacity * nominalVoltageVolts / 1000f) else finalRealTotalEnergyWh
         val screenOffPercent = if (nominalTotalWh > 0f && finalOffEnergyWh > 0f) (finalOffEnergyWh / nominalTotalWh) * 100f else 0f

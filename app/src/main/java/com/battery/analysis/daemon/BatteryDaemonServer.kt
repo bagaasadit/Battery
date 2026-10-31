@@ -33,7 +33,7 @@ class BatteryDaemonServer {
         const val STOP_FILE_PATH = "/data/local/tmp/battery_daemon.stop"
         const val LOCK_FILE_PATH = "/data/local/tmp/battery_daemon.lock"
 
-        private const val CHECK_INTERVAL_MS = 3000L
+        private const val CHECK_INTERVAL_MS = 15000L
 
         private var lockRaf: RandomAccessFile? = null
         private var lockChannel: FileChannel? = null
@@ -78,11 +78,12 @@ class BatteryDaemonServer {
             val myUid = getMyUid()
             val startTime = System.currentTimeMillis()
             var reviveCount = 0
+            var lastStatusWriteTime = System.currentTimeMillis()
 
             logInfo("Daemon initialized. PID=$myPid, UID=$myUid, StartTime=$startTime")
 
             // 6. 初始写入状态文件
-            updateStatusFile(myPid, myUid, startTime, System.currentTimeMillis(), reviveCount, "RUNNING")
+            updateStatusFile(myPid, myUid, startTime, lastStatusWriteTime, reviveCount, "RUNNING")
 
             // 7. 核心守护与反向拉活主循环
             while (true) {
@@ -99,19 +100,25 @@ class BatteryDaemonServer {
 
                     // 检测主应用进程是否处于存活状态
                     val isAppAlive = isPackageRunning(PACKAGE_NAME)
+                    var didRevive = false
                     if (!isAppAlive) {
                         logInfo("Host process $PACKAGE_NAME is NOT running! Reviving...")
                         val success = reviveService()
                         if (success) {
                             reviveCount++
+                            didRevive = true
                             logInfo("Revived successfully! Total count: $reviveCount")
                         } else {
                             logInfo("Revive command executed, waiting for state change.")
                         }
                     }
 
-                    // 更新心跳状态
-                    updateStatusFile(myPid, myUid, startTime, System.currentTimeMillis(), reviveCount, "RUNNING")
+                    // 仅在发生拉活事件或满 5 分钟心跳才刷写一次状态文件，杜绝每数秒高频写盘
+                    val now = System.currentTimeMillis()
+                    if (didRevive || (now - lastStatusWriteTime) >= 300_000L) {
+                        lastStatusWriteTime = now
+                        updateStatusFile(myPid, myUid, startTime, now, reviveCount, "RUNNING")
+                    }
 
                     // 避免频繁占用 CPU，休眠指定周期
                     Thread.sleep(CHECK_INTERVAL_MS)

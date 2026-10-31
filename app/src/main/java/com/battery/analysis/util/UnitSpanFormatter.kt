@@ -29,6 +29,11 @@ object UnitSpanFormatter {
     const val MIN_UNIT_SP = 6f
 
     /**
+     * 针对高频格式化结果的 LRU 内存缓存（容量 512 项），彻底消除 120 FPS 滚动与周期刷新时的重复正则与对象分配。
+     */
+    private val spanCache = androidx.collection.LruCache<String, CharSequence>(512)
+
+    /**
      * 匹配紧跟在数字（允许存在 0 个或多个空格）后面的物理量、工程与时间单位。
      * 优先匹配复合单位与较长单位，杜绝短单位前缀截断问题。
      */
@@ -55,8 +60,15 @@ object UnitSpanFormatter {
         }
 
         val rawStr = text.toString()
+        val cacheKey = "${rawStr}_${targetUnitSp ?: 0f}_$reduceSp"
+        val cached = spanCache.get(cacheKey)
+        if (cached != null) {
+            return cached
+        }
+
         val matches = UNIT_REGEX.findAll(rawStr).toList()
         if (matches.isEmpty()) {
+            spanCache.put(cacheKey, text)
             return text
         }
 
@@ -111,6 +123,7 @@ object UnitSpanFormatter {
             builder.setSpan(span, start, end, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
         }
 
+        spanCache.put(cacheKey, builder)
         return builder
     }
 
@@ -254,10 +267,16 @@ object UnitSpanFormatter {
 fun TextView.setUnitText(text: CharSequence?, reduceSp: Float = UnitSpanFormatter.DEFAULT_REDUCE_SP) {
     if (text == null) {
         this.text = null
+        this.tag = null
         return
     }
     val scaledDensity = resources.displayMetrics.scaledDensity.takeIf { it > 0f } ?: 1f
     val currentSp = this.textSize / scaledDensity
     val targetUnitSp = (currentSp - reduceSp).coerceAtLeast(UnitSpanFormatter.MIN_UNIT_SP)
-    this.text = UnitSpanFormatter.format(text, targetUnitSp = targetUnitSp)
+    val cacheKey = "${text}_${targetUnitSp}_$reduceSp"
+    if (this.tag == cacheKey && this.text?.isNotEmpty() == true) {
+        return
+    }
+    this.tag = cacheKey
+    this.text = UnitSpanFormatter.format(text, targetUnitSp = targetUnitSp, reduceSp = reduceSp)
 }

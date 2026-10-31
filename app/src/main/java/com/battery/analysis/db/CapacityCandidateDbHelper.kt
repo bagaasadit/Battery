@@ -54,6 +54,14 @@ class CapacityCandidateDbHelper private constructor(context: Context) :
         }
     }
 
+    override fun onConfigure(db: SQLiteDatabase) {
+        super.onConfigure(db)
+        try {
+            db.enableWriteAheadLogging()
+            db.execSQL("PRAGMA synchronous = NORMAL")
+        } catch (_: Exception) {}
+    }
+
     /**
      * 数据库初次创建时的结构定义。
      *

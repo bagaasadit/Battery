@@ -54,6 +54,14 @@ class ChargingHistoryDbHelper private constructor(private val context: Context) 
         }
     }
 
+    override fun onConfigure(db: SQLiteDatabase) {
+        super.onConfigure(db)
+        try {
+            db.enableWriteAheadLogging()
+            db.execSQL("PRAGMA synchronous = NORMAL")
+        } catch (_: Exception) {}
+    }
+
     /**
      * 数据库表初次创建时的结构定义。
      *
@@ -560,6 +568,9 @@ class ChargingHistoryDbHelper private constructor(private val context: Context) 
         return list
     }
 
+    @Volatile
+    private var hasSanitizedOnStart: Boolean = false
+
     /**
      * 查询所有已持久化的充电历史记录，按时间倒序（最新在前）排列。
      * 查询前自动执行一次轻量自愈与去重，确保返回的账本完全纯净真实。
@@ -567,10 +578,13 @@ class ChargingHistoryDbHelper private constructor(private val context: Context) 
      * @return 充电历史记录列表
      */
     fun getAllRecords(): List<ChargingHistoryRecord> {
-        try {
-            sanitizeAndDeduplicateRecords()
-        } catch (e: Exception) {
-            e.printStackTrace()
+        if (!hasSanitizedOnStart) {
+            hasSanitizedOnStart = true
+            try {
+                sanitizeAndDeduplicateRecords()
+            } catch (e: Exception) {
+                e.printStackTrace()
+            }
         }
         val list = mutableListOf<ChargingHistoryRecord>()
         val db = readableDatabase
@@ -584,8 +598,88 @@ class ChargingHistoryDbHelper private constructor(private val context: Context) 
             "$COL_ID DESC"
         )
         cursor.use {
+            if (!it.moveToFirst()) return list
+            val idxId = it.getColumnIndexOrThrow(COL_ID)
+            val idxRecordTime = it.getColumnIndexOrThrow(COL_RECORD_TIME)
+            val idxStartTs = it.getColumnIndexOrThrow(COL_START_TIMESTAMP)
+            val idxEndTs = it.getColumnIndexOrThrow(COL_END_TIMESTAMP)
+            val idxDuration = it.getColumnIndexOrThrow(COL_DURATION_MS)
+            val idxStartLvl = it.getColumnIndexOrThrow(COL_START_LEVEL)
+            val idxEndLvl = it.getColumnIndexOrThrow(COL_END_LEVEL)
+            val idxLvlGain = it.getColumnIndexOrThrow(COL_LEVEL_GAIN)
+            val idxEnergy = it.getColumnIndexOrThrow(COL_CHARGED_ENERGY_WH)
+            val idxAvgPwr = it.getColumnIndexOrThrow(COL_AVG_POWER_WATTS)
+            val idxMaxPwr = it.getColumnIndexOrThrow(COL_MAX_POWER_WATTS)
+            val idxMaxTemp = it.getColumnIndexOrThrow(COL_MAX_TEMPERATURE)
+            val idxChargeType = it.getColumnIndexOrThrow(COL_CHARGE_TYPE)
+            val idxOffDur = it.getColumnIndexOrThrow(COL_SCREEN_OFF_DURATION_MS)
+            val idxOffGain = it.getColumnIndexOrThrow(COL_SCREEN_OFF_LEVEL_GAIN)
+            val idxOffEnergy = it.getColumnIndexOrThrow(COL_SCREEN_OFF_ENERGY_WH)
             val sampleIdx = it.getColumnIndex(COL_SAMPLE_POINTS_JSON)
-            while (it.moveToNext()) {
+
+            do {
+                val rawRecord = ChargingHistoryRecord(
+                    id = it.getLong(idxId),
+                    recordTime = it.getString(idxRecordTime),
+                    startTimestamp = it.getLong(idxStartTs),
+                    endTimestamp = it.getLong(idxEndTs),
+                    durationMs = it.getLong(idxDuration),
+                    startLevel = it.getInt(idxStartLvl),
+                    endLevel = it.getInt(idxEndLvl),
+                    levelGain = it.getInt(idxLvlGain),
+                    chargedEnergyWh = it.getFloat(idxEnergy),
+                    avgPowerWatts = it.getFloat(idxAvgPwr),
+                    maxPowerWatts = it.getFloat(idxMaxPwr),
+                    maxTemperature = it.getFloat(idxMaxTemp),
+                    chargeType = it.getString(idxChargeType) ?: "",
+                    screenOffDurationMs = it.getLong(idxOffDur),
+                    screenOffLevelGain = it.getInt(idxOffGain),
+                    screenOffEnergyWh = it.getFloat(idxOffEnergy),
+                    samplePointsJson = if (sampleIdx >= 0) it.getString(sampleIdx) ?: "" else ""
+                )
+                val effectiveEnd = rawRecord.getEffectiveEndLevel()
+                val effectiveGain = rawRecord.getEffectiveLevelGain()
+                val record = if (effectiveEnd != rawRecord.endLevel || effectiveGain != rawRecord.levelGain) {
+                    val corrected = rawRecord.copy(endLevel = effectiveEnd, levelGain = effectiveGain)
+                    try {
+                        val updateValues = ContentValues().apply {
+                            put(COL_END_LEVEL, effectiveEnd)
+                            put(COL_LEVEL_GAIN, effectiveGain)
+                        }
+                        db.update(TABLE_NAME, updateValues, "$COL_ID = ?", arrayOf(rawRecord.id.toString()))
+                    } catch (e: Exception) {
+                        e.printStackTrace()
+                    }
+                    corrected
+                } else {
+                    rawRecord
+                }
+                list.add(record)
+            } while (it.moveToNext())
+        }
+        return list
+    }
+
+    /**
+     * 查询最新的一条已归档充电记录，避免全表加载与反序列化。
+     *
+     * @return 最新充电记录，不存在时返回 null
+     */
+    fun getLatestRecord(): ChargingHistoryRecord? {
+        val db = readableDatabase
+        val cursor = db.query(
+            TABLE_NAME,
+            null,
+            null,
+            null,
+            null,
+            null,
+            "$COL_ID DESC",
+            "1"
+        )
+        cursor.use {
+            if (it.moveToFirst()) {
+                val sampleIdx = it.getColumnIndex(COL_SAMPLE_POINTS_JSON)
                 val rawRecord = ChargingHistoryRecord(
                     id = it.getLong(it.getColumnIndexOrThrow(COL_ID)),
                     recordTime = it.getString(it.getColumnIndexOrThrow(COL_RECORD_TIME)),
@@ -607,25 +701,14 @@ class ChargingHistoryDbHelper private constructor(private val context: Context) 
                 )
                 val effectiveEnd = rawRecord.getEffectiveEndLevel()
                 val effectiveGain = rawRecord.getEffectiveLevelGain()
-                val record = if (effectiveEnd != rawRecord.endLevel || effectiveGain != rawRecord.levelGain) {
-                    val corrected = rawRecord.copy(endLevel = effectiveEnd, levelGain = effectiveGain)
-                    try {
-                        val updateValues = ContentValues().apply {
-                            put(COL_END_LEVEL, effectiveEnd)
-                            put(COL_LEVEL_GAIN, effectiveGain)
-                        }
-                        db.update(TABLE_NAME, updateValues, "$COL_ID = ?", arrayOf(rawRecord.id.toString()))
-                    } catch (e: Exception) {
-                        e.printStackTrace()
-                    }
-                    corrected
+                return if (effectiveEnd != rawRecord.endLevel || effectiveGain != rawRecord.levelGain) {
+                    rawRecord.copy(endLevel = effectiveEnd, levelGain = effectiveGain)
                 } else {
                     rawRecord
                 }
-                list.add(record)
             }
         }
-        return list
+        return null
     }
 
     /**

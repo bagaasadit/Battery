@@ -487,7 +487,18 @@ class PowerUsageFragment : Fragment() {
                 super.onScrollStateChanged(recyclerView, newState)
                 // 滑动过程中彻底冻结图表重绘、重载与数据刷新
                 val isScrolling = (newState != androidx.recyclerview.widget.RecyclerView.SCROLL_STATE_IDLE)
+                isUserScrolling = isScrolling
                 adapter.setScrolling(isScrolling)
+                if (!isScrolling) {
+                    pendingIncrementalPackage?.let { pkg ->
+                        pendingIncrementalPackage = null
+                        renderDischargeRealtimeIncremental(pkg)
+                    }
+                    pendingFastStatusUpdate?.let { action ->
+                        pendingFastStatusUpdate = null
+                        action.invoke()
+                    }
+                }
             }
 
             override fun onScrolled(recyclerView: androidx.recyclerview.widget.RecyclerView, dx: Int, dy: Int) {
@@ -1729,6 +1740,9 @@ class PowerUsageFragment : Fragment() {
 
     /** 放电数据前台轻量实时刷新协程（默认 2 秒一次瞬时硬件指标，30 秒一次静默全量同步） */
     private var dischargePollingJob: Job? = null
+    private var isUserScrolling = false
+    private var pendingFastStatusUpdate: (() -> Unit)? = null
+    private var pendingIncrementalPackage: com.battery.analysis.manager.FullPowerDataPackage? = null
 
     /**
      * 启动放电数据前台智能混合实时刷新协程（方案 A）：
@@ -1773,32 +1787,40 @@ class PowerUsageFragment : Fragment() {
                 withContext(Dispatchers.Main) {
                     if (_binding == null || currentDisplayTab != 0 || isViewingSnapshot) return@withContext
 
-                    // 更新概览指标卡片瞬时电压与温度
-                    val lastUnplugWh = powerManager.getLastUnplugEnergyWh()
-                    adapter.updateOverviewMetrics(
-                        energyWh = status.energyWh,
-                        totalEnergyWh = status.totalEnergyWh,
-                        lastUnplugWh = lastUnplugWh,
-                        temp = curTemp,
-                        volt = curVolt,
-                        isCharging = false
-                    )
+                    val updateAction = {
+                        // 更新概览指标卡片瞬时电压与温度
+                        val lastUnplugWh = powerManager.getLastUnplugEnergyWh()
+                        adapter.updateOverviewMetrics(
+                            energyWh = status.energyWh,
+                            totalEnergyWh = status.totalEnergyWh,
+                            lastUnplugWh = lastUnplugWh,
+                            temp = curTemp,
+                            volt = curVolt,
+                            isCharging = false
+                        )
 
-                    // 实时更新当前亮屏瞬时功耗 (Watt)
-                    if (curWatt != null && curWatt >= 0.05f) {
-                        val instantWattStr = String.format(Locale.getDefault(), "%.2fW", curWatt)
-                        binding.tvMetricScreenOnPower.setUnitText(instantWattStr)
+                        // 实时更新当前亮屏瞬时功耗 (Watt，物理上限 25.0W 约束)
+                        if (curWatt != null && curWatt in 0.05f..25.0f) {
+                            val instantWattStr = String.format(Locale.getDefault(), "%.2fW", curWatt)
+                            binding.tvMetricScreenOnPower.setUnitText(instantWattStr)
+                        }
+
+                        adapter.updateOverviewStats(
+                            overviewStats = lastRenderedPackage?.overviewStats,
+                            totalCapacityWh = status.totalEnergyWh,
+                            batteryLevelPercent = status.levelPercent.toFloat(),
+                            remainingEnergyWh = status.energyWh,
+                            tempCelsius = curTemp,
+                            trendPoints = lastRenderedPackage?.trendPoints,
+                            forceRecalculateRuntime = false
+                        )
                     }
 
-                    adapter.updateOverviewStats(
-                        overviewStats = lastRenderedPackage?.overviewStats,
-                        totalCapacityWh = status.totalEnergyWh,
-                        batteryLevelPercent = status.levelPercent.toFloat(),
-                        remainingEnergyWh = status.energyWh,
-                        tempCelsius = curTemp,
-                        trendPoints = lastRenderedPackage?.trendPoints,
-                        forceRecalculateRuntime = false
-                    )
+                    if (isUserScrolling) {
+                        pendingFastStatusUpdate = updateAction
+                    } else {
+                        updateAction.invoke()
+                    }
                 }
 
                 // 2. 每 30 秒 (15 次循环) 执行一次静默后台全量同步 (更新 App 消耗列表与时间轴)
@@ -1813,7 +1835,9 @@ class PowerUsageFragment : Fragment() {
                         withContext(Dispatchers.Main) {
                             if (_binding != null && currentDisplayTab == 0 && !isViewingSnapshot && !chargingManager.isCharging()) {
                                 // 若用户正在手势滑动列表，则延后到空闲时刷新以保障 120 FPS 流畅度
-                                if (binding.recyclerAppUsage.scrollState == androidx.recyclerview.widget.RecyclerView.SCROLL_STATE_IDLE) {
+                                if (isUserScrolling || binding.recyclerAppUsage.scrollState != androidx.recyclerview.widget.RecyclerView.SCROLL_STATE_IDLE) {
+                                    pendingIncrementalPackage = fullPackage
+                                } else {
                                     renderDischargeRealtimeIncremental(fullPackage)
                                 }
                             }
@@ -1855,17 +1879,17 @@ class PowerUsageFragment : Fragment() {
             isCharging = snapshot.isCharging
         )
 
-        val onPowerStr = if (overview.screenOnPowerWatts >= 0.05f) {
+        val onPowerStr = if (overview.screenOnPowerWatts in 0.05f..25.0f) {
             String.format(Locale.getDefault(), "%.2fW", overview.screenOnPowerWatts)
         } else {
             "--"
         }
-        val avgPowerStr = if (overview.avgPowerWatts >= 0.05f) {
+        val avgPowerStr = if (overview.avgPowerWatts in 0.05f..25.0f) {
             String.format(Locale.getDefault(), "%.2fW", overview.avgPowerWatts)
         } else {
             "--"
         }
-        val offPowerStr = if (overview.screenOffPowerWatts >= 0.05f) {
+        val offPowerStr = if (overview.screenOffPowerWatts in 0.05f..25.0f) {
             String.format(Locale.getDefault(), "%.2fW", overview.screenOffPowerWatts)
         } else {
             "--"
@@ -2362,17 +2386,17 @@ class PowerUsageFragment : Fragment() {
         val offDurationStr = formatCardDuration(offDurationMs, overview.screenOffDurationText)
         val totalDurationStr = formatCardDuration(totalDurationMs, overview.totalDurationText)
 
-        val onPowerStr = if (overview.screenOnPowerWatts >= 0.05f) {
+        val onPowerStr = if (overview.screenOnPowerWatts in 0.05f..25.0f) {
             String.format(Locale.getDefault(), "%.2fW", overview.screenOnPowerWatts)
         } else {
             "--"
         }
-        val avgPowerStr = if (overview.avgPowerWatts >= 0.05f) {
+        val avgPowerStr = if (overview.avgPowerWatts in 0.05f..25.0f) {
             String.format(Locale.getDefault(), "%.2fW", overview.avgPowerWatts)
         } else {
             "--"
         }
-        val offPowerStr = if (overview.screenOffPowerWatts >= 0.05f) {
+        val offPowerStr = if (overview.screenOffPowerWatts in 0.05f..25.0f) {
             String.format(Locale.getDefault(), "%.2fW", overview.screenOffPowerWatts)
         } else {
             "--"
@@ -2582,17 +2606,17 @@ class PowerUsageFragment : Fragment() {
             "--%"
         }
 
-        val onPowerStr = if (subStats.screenOnPowerWatts >= 0.05f) {
+        val onPowerStr = if (subStats.screenOnPowerWatts in 0.05f..25.0f) {
             String.format(Locale.getDefault(), "%.2fW", subStats.screenOnPowerWatts)
         } else {
             "--"
         }
-        val avgPowerStr = if (subStats.avgPowerWatts >= 0.05f) {
+        val avgPowerStr = if (subStats.avgPowerWatts in 0.05f..25.0f) {
             String.format(Locale.getDefault(), "%.2fW", subStats.avgPowerWatts)
         } else {
             "--"
         }
-        val offPowerStr = if (subStats.screenOffPowerWatts >= 0.05f) {
+        val offPowerStr = if (subStats.screenOffPowerWatts in 0.05f..25.0f) {
             String.format(Locale.getDefault(), "%.2fW", subStats.screenOffPowerWatts)
         } else {
             "--"
@@ -2693,17 +2717,17 @@ class PowerUsageFragment : Fragment() {
         val offDurationStr = formatCardDuration(offDurationMs, overview.screenOffDurationText)
         val totalDurationStr = formatCardDuration(totalDurationMs, overview.totalDurationText)
 
-        val onPowerStr = if (overview.screenOnPowerWatts >= 0.05f) {
+        val onPowerStr = if (overview.screenOnPowerWatts in 0.05f..25.0f) {
             String.format(Locale.getDefault(), "%.2fW", overview.screenOnPowerWatts)
         } else {
             "--"
         }
-        val avgPowerStr = if (overview.avgPowerWatts >= 0.05f) {
+        val avgPowerStr = if (overview.avgPowerWatts in 0.05f..25.0f) {
             String.format(Locale.getDefault(), "%.2fW", overview.avgPowerWatts)
         } else {
             "--"
         }
-        val offPowerStr = if (overview.screenOffPowerWatts >= 0.05f) {
+        val offPowerStr = if (overview.screenOffPowerWatts in 0.05f..25.0f) {
             String.format(Locale.getDefault(), "%.2fW", overview.screenOffPowerWatts)
         } else {
             "--"

@@ -128,9 +128,9 @@ object SysfsBatterySampler {
         }
     }
 
-    /** 上次采样获取到的库仑计真实电荷量（微安时 uAh） */
+    /** 上次采样获取到的库仑计真实电荷量（标准毫安时 mAh） */
     @Volatile
-    private var lastCoulombChargeUah: Long = 0L
+    private var lastCoulombChargeMah: Float = 0f
 
     /** 上次记录库仑计真实电荷量的时间戳（SystemClock.elapsedRealtime 毫秒） */
     @Volatile
@@ -146,32 +146,34 @@ object SysfsBatterySampler {
      * @return 推算出的真实瞬时电流（毫安 mA），若差分条件未就绪或未发生电荷流动则返回 null
      */
     private fun calculateCurrentFromChargeCounter(bm: BatteryManager): Float? {
-        val chargeUah = bm.getIntProperty(BatteryManager.BATTERY_PROPERTY_CHARGE_COUNTER).toLong()
-        if (chargeUah <= 0L) return null
+        val rawCounter = bm.getIntProperty(BatteryManager.BATTERY_PROPERTY_CHARGE_COUNTER).toLong()
+        if (rawCounter <= 0L) return null
+        val chargeMah = com.battery.analysis.domain.estimator.BatteryUnitNormalizer.normalizeChargeCounterToMah(rawCounter = rawCounter)
+        if (chargeMah <= 0f) return null
         val now = android.os.SystemClock.elapsedRealtime()
-        val prevUah = lastCoulombChargeUah
+        val prevMah = lastCoulombChargeMah
         val prevTime = lastCoulombTimestampMs
 
-        if (prevTime <= 0L || prevUah <= 0L) {
-            lastCoulombChargeUah = chargeUah
+        if (prevTime <= 0L || prevMah <= 0f) {
+            lastCoulombChargeMah = chargeMah
             lastCoulombTimestampMs = now
             return null
         }
 
-        val deltaUah = Math.abs(chargeUah - prevUah)
-        if (deltaUah == 0L) {
+        val deltaMah = Math.abs(chargeMah - prevMah)
+        if (deltaMah <= 0.0001f) {
             // 电荷尚未发生离散步进，保持 prevTime 记录步进起始时间
             return null
         }
 
         // 仅在电荷量真实发生跳变时更新基准时间与电荷量
         val dtMs = now - prevTime
-        lastCoulombChargeUah = chargeUah
+        lastCoulombChargeMah = chargeMah
         lastCoulombTimestampMs = now
 
         // 步进周期在有效合理窗口（3秒 ~ 5分钟）内推算真实放电电流
         if (dtMs in 3_000L..300_000L) {
-            val ma = (deltaUah * 3600f) / dtMs
+            val ma = (deltaMah * 3600_000f) / dtMs
             // 物理放电保护：手机正常瞬时放电电流绝不会超过 4000mA（约 16W），若超出说明属于跨周期阶跃，不作为瞬时物理电流
             if (ma in 10f..4000f) {
                 return ma
@@ -480,7 +482,7 @@ object SysfsBatterySampler {
                     return HardwareSample(
                         currentMa = signedCur,
                         voltageVolts = voltV,
-                        powerWatts = Math.round(signedPower * 1000f) / 1000f,
+                        powerWatts = signedPower,
                         temperatureCelsius = tempC
                     )
                 }
@@ -514,7 +516,7 @@ object SysfsBatterySampler {
             return HardwareSample(
                 currentMa = signedCur,
                 voltageVolts = directVolt,
-                powerWatts = Math.round(signedPower * 1000f) / 1000f,
+                powerWatts = signedPower,
                 temperatureCelsius = directTemp
             )
         }
@@ -693,7 +695,7 @@ object SysfsBatterySampler {
             HardwareSample(
                 currentMa = signedCur,
                 voltageVolts = finalVoltage,
-                powerWatts = Math.round(signedPower * 1000f) / 1000f,
+                powerWatts = signedPower,
                 temperatureCelsius = finalTemp
             )
         } catch (_: Throwable) {
@@ -1043,11 +1045,7 @@ object SysfsBatterySampler {
      * @return 伏特值
      */
     private fun normalizeVoltageToVolts(raw: Long): Float {
-        return when {
-            raw >= 100_000L -> raw / 1_000_000f  // uV → V
-            raw >= 1_000L   -> raw / 1000f        // mV → V
-            else            -> raw.toFloat()
-        }
+        return BatteryUnitNormalizer.normalizeVoltageVolts(raw)
     }
 
     /**
@@ -1208,7 +1206,7 @@ object SysfsBatterySampler {
                         val sample = HardwareSample(
                             currentMa = signedCur,
                             voltageVolts = voltV,
-                            powerWatts = Math.round(signedPower * 1000f) / 1000f,
+                            powerWatts = signedPower,
                             temperatureCelsius = tempC
                         )
                         lastShizukuSampleTime = now

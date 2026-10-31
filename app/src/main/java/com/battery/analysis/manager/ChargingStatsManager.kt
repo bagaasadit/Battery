@@ -750,11 +750,11 @@ class ChargingStatsManager private constructor(private val context: Context) {
         // 重新计算并汇总指标
         updateSummaryMetrics(point, type, charging, deltaEnergyWh, deltaScreenOffMs, deltaScreenOffGain, deltaScreenOffEnergy)
 
-        // 极致低功耗设计：日常采样纯内存追加，每积累 60 个点（约 1~2 分钟）或超过 2 分钟才异步落盘一次，
-        // 彻底消除每秒为 500 个点频繁全量创建 JSONObject 与 SharedPreferences 频繁写盘开销
+        // 极致低功耗设计：日常采样纯内存追加，仅每积累 900 个点（约 15 分钟）或时间满 15 分钟（900_000L）才异步落盘一次草稿，
+        // 彻底消除短间隔为 500 个点频繁全量创建 JSONObject 与 SharedPreferences 频繁写盘开销（插拔电时已由生命周期强制落盘）
         unsavedChargingPointsCount++
         val nowMs = System.currentTimeMillis()
-        if (unsavedChargingPointsCount >= 60 || (nowMs - lastChargingSaveTimeMs >= 120_000L && unsavedChargingPointsCount >= 10)) {
+        if (unsavedChargingPointsCount >= 900 || (nowMs - lastChargingSaveTimeMs >= 900_000L && unsavedChargingPointsCount >= 30)) {
             unsavedChargingPointsCount = 0
             lastChargingSaveTimeMs = nowMs
             flushChargingSessionToPrefsAsync()

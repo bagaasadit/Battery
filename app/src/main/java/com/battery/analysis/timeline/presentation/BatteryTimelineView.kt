@@ -650,6 +650,10 @@ class BatteryTimelineView @JvmOverloads constructor(
      * @param state 最新的时间轴状态 [BatteryTimelineState]
      */
     fun setState(state: BatteryTimelineState) {
+        if (isParentScrolling) {
+            pendingTimelineState = state
+            return
+        }
         val now = System.currentTimeMillis()
         val start = if (state.startTimestamp > 0L) state.startTimestamp else (now - 1800_000L)
         val end = if (state.endTimestamp > start) state.endTimestamp else (start + 1800_000L)

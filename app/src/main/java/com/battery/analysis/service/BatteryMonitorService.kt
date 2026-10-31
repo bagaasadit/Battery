@@ -94,6 +94,12 @@ class BatteryMonitorService : Service() {
     private var lastNotifiedContent: String? = null
     @Volatile
     private var lastNotifiedTime: Long = 0L
+    @Volatile
+    private var lastNotifiedPowerWatts: Float = 0f
+    @Volatile
+    private var lastNotifiedIsCharging: Boolean = false
+    @Volatile
+    private var lastNotifiedLevel: Int = -1
     /** 上次屏幕熄灭时的 elapsedRealtime（毫秒），用于亮屏时差分计算总休眠时长 */
     @Volatile
     private var lastScreenOffRealtime: Long = 0L
@@ -455,7 +461,7 @@ class BatteryMonitorService : Service() {
                                 context = this@BatteryMonitorService,
                                 fallbackVoltageVolts = cachedVoltageVolts,
                                 fallbackTempCelsius = cachedTemperature,
-                                allowProcessFork = true
+                                allowProcessFork = false // 息屏被动广播采样严禁 Fork 进程，杜绝唤醒耗电
                             )
                             val pWatts = hwSample?.powerWatts ?: 0f
                             val curVolt = hwSample?.voltageVolts ?: cachedVoltageVolts
@@ -664,7 +670,10 @@ class BatteryMonitorService : Service() {
             PowerUsageManager.getInstance(applicationContext).requestCheckpoint(force = false)
         }
 
-        updateNotification(force = true)
+        // 仅在亮屏且通知开启时强制刷新通知，避免在息屏深睡被唤醒时频繁打扰 SystemUI
+        if (cachedIsInteractive) {
+            updateNotification(force = true)
+        }
         return START_STICKY
     }
 
@@ -856,8 +865,8 @@ class BatteryMonitorService : Service() {
                             cachedTemperature = curTemp
                             cachedLevelPercent = samplePoint.batteryLevel
 
-                            // 极速直通悬浮窗：第一时间将最新硬件功率与温度派发至悬浮窗 UI，零阻塞
-                            if (com.battery.analysis.manager.FloatingWindowManager.isFloatingEnabled(this@BatteryMonitorService)) {
+                            // 极速直通悬浮窗：第一时间将最新硬件功率与温度派发至悬浮窗 UI，零阻塞（仅亮屏可见时刷新）
+                            if (isInteractive && com.battery.analysis.manager.FloatingWindowManager.isFloatingEnabled(this@BatteryMonitorService)) {
                                 com.battery.analysis.manager.FloatingWindowManager.updateData(
                                     this@BatteryMonitorService,
                                     curPower,
@@ -894,9 +903,8 @@ class BatteryMonitorService : Service() {
                                 cachedDischargePowerWatts = pWatts
                             }
 
-                            // 2. 极速直通悬浮窗：在执行任何可能产生跨进程延迟的前台包名探测或通知栏更新前，
-                            // 第一时间直接驱动桌面悬浮窗刷新，保证视觉更新严格对齐时钟节拍
-                            if (com.battery.analysis.manager.FloatingWindowManager.isFloatingEnabled(this@BatteryMonitorService)) {
+                            // 2. 极速直通悬浮窗：仅在亮屏可见时刷新桌面悬浮窗，息屏时保持 0 开销
+                            if (isInteractive && com.battery.analysis.manager.FloatingWindowManager.isFloatingEnabled(this@BatteryMonitorService)) {
                                 com.battery.analysis.manager.FloatingWindowManager.updateData(
                                     this@BatteryMonitorService,
                                     pWatts,
@@ -960,8 +968,11 @@ class BatteryMonitorService : Service() {
     @Volatile
     private var lastForegroundQueryTime: Long = 0L
 
-    /** 前台包名短效内存缓存有效时长（毫秒），设为 2 秒，兼顾采样周期及时响应与避免高频 Binder IPC */
-    private val FOREGROUND_CACHE_EXPIRE_MS = 2_000L
+    /** 前台包名短效内存缓存有效时长（毫秒），设为 5 秒智能缓存，大幅减少 UsageStatsManager 跨进程 Binder IPC */
+    private val FOREGROUND_CACHE_EXPIRE_MS = 5_000L
+
+    /** 单例复用 UsageEvents.Event，避免 1Hz 采样循环高频创建产生内存碎片与 GC 压力 */
+    private val reusableUsageEvent = UsageEvents.Event()
 
     /**
      * 获取当前处于系统最前台运行的应用包名。
@@ -1038,7 +1049,7 @@ class BatteryMonitorService : Service() {
             if (usm != null) {
                 val windowMs = if (lastKnownForegroundPackage != null) 10_000L else 30_000L
                 val events = usm.queryEvents(now - windowMs, now)
-                val event = UsageEvents.Event()
+                val event = reusableUsageEvent
                 var latestResumedPkg: String? = null
                 var latestResumedTs = 0L
                 var hasAnyEvent = false
@@ -1227,6 +1238,19 @@ class BatteryMonitorService : Service() {
             }
 
             val isCharging = cachedIsCharging
+            val curLevel = cachedLevelPercent
+            val currentWatt = powerWatts ?: 0f
+            val nowRealtime = SystemClock.elapsedRealtime()
+
+            val isStateChanged = (isCharging != lastNotifiedIsCharging) || (curLevel != lastNotifiedLevel)
+            val powerDelta = abs(currentWatt - lastNotifiedPowerWatts)
+            val isTimeThrottlePassed = (nowRealtime - lastNotifiedTime) >= 4_000L
+
+            // 动态限流保护：仅在状态切换（充/放电、电量变化）、功率跳变 >= 0.3W、或满 4 秒最小保护时间窗口时才通知 SystemUI
+            if (!isStateChanged && powerDelta < 0.3f && !isTimeThrottlePassed && !isSilentNotificationActive) {
+                return
+            }
+
             val powerStr = if (powerWatts != null && abs(powerWatts) > 0.05f) {
                 if (isCharging) {
                     if (powerWatts > 0f) {
@@ -1251,12 +1275,17 @@ class BatteryMonitorService : Service() {
             }
             cachedSingleLineInfo = singleLineInfo
             lastNotifiedContent = singleLineInfo
-            lastNotifiedTime = SystemClock.elapsedRealtime()
+            lastNotifiedTime = nowRealtime
+            lastNotifiedPowerWatts = currentWatt
+            lastNotifiedIsCharging = isCharging
+            lastNotifiedLevel = curLevel
 
             val notification = buildNotification(CHANNEL_ID, singleLineInfo)
-            safeStartForeground(notification)
+            if (isSilentNotificationActive) {
+                safeStartForeground(notification)
+                isSilentNotificationActive = false
+            }
             notificationManager.notify(NOTIFICATION_ID, notification)
-            isSilentNotificationActive = false
         } catch (_: Exception) {}
     }
 
@@ -1389,8 +1418,8 @@ class BatteryMonitorService : Service() {
         const val KEY_CHARGE_DISCHARGE_STATS_ENABLED = "pref_charge_discharge_stats_enabled"
         const val INTERVAL_NEVER = -1L
         const val DEFAULT_SCREEN_ON_INTERVAL_MS = 1000L
-        /** 息屏放电采样默认间隔（毫秒）：默认为 1 秒（1000L）高频精准采集 */
-        const val DEFAULT_SCREEN_OFF_INTERVAL_MS = 1000L
+        /** 息屏放电采样默认间隔（毫秒）：默认为 0L（Smart Eco Mode 智能省电）， murni pasif 零唤醒 */
+        const val DEFAULT_SCREEN_OFF_INTERVAL_MS = 0L
 
         private const val KEY_LAST_SCREEN_OFF_REALTIME = "pref_last_screen_off_realtime"
         private const val KEY_LAST_SCREEN_OFF_UPTIME = "pref_last_screen_off_uptime"
@@ -1610,7 +1639,10 @@ class BatteryMonitorService : Service() {
             if (isFloating) {
                 return true
             }
-            if (isServiceEnabled(context)) {
+            if (!isServiceEnabled(context)) {
+                return false
+            }
+            if (isNotificationDisplayEnabled(context)) {
                 return true
             }
             if (isChargeDischargeStatsEnabled(context)) {
@@ -1768,10 +1800,11 @@ class BatteryMonitorService : Service() {
                 val am = context.getSystemService(Context.ALARM_SERVICE) as? AlarmManager ?: return
                 val pi = getHeartbeatPendingIntent(context) ?: return
                 val triggerAt = SystemClock.elapsedRealtime() + HEARTBEAT_INTERVAL_MS
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-                    am.setExactAndAllowWhileIdle(AlarmManager.ELAPSED_REALTIME_WAKEUP, triggerAt, pi)
+                // 采用非唤醒 ELAPSED_REALTIME 与弹性时间窗，绝不主动刺穿 Doze Mode 或从 Deep Sleep 中唤醒 CPU
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.KITKAT) {
+                    am.setWindow(AlarmManager.ELAPSED_REALTIME, triggerAt, HEARTBEAT_INTERVAL_MS / 2, pi)
                 } else {
-                    am.setExact(AlarmManager.ELAPSED_REALTIME_WAKEUP, triggerAt, pi)
+                    am.set(AlarmManager.ELAPSED_REALTIME, triggerAt, pi)
                 }
             } catch (e: Exception) {
                 e.printStackTrace()

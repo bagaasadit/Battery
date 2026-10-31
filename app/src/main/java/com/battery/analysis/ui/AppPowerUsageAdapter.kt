@@ -89,10 +89,66 @@ class AppPowerUsageAdapter : RecyclerView.Adapter<RecyclerView.ViewHolder>() {
         const val CARD_AWAKE = 2
         /** 睡眠卡片点击分类标识：深度睡眠卡片 */
         const val CARD_DEEP_SLEEP = 3
+
+        /** 局部增量刷新载荷：应用瞬时能耗与时长变更（避免重绘图标与标题） */
+        const val PAYLOAD_APP_METRICS = 1
     }
 
-    // 当前供 RecyclerView 绑定的完整平铺条目数据列表
-    private val items = mutableListOf<PowerUsageItem>()
+    private val diffCallback = object : DiffUtil.ItemCallback<PowerUsageItem>() {
+        override fun areItemsTheSame(oldItem: PowerUsageItem, newItem: PowerUsageItem): Boolean {
+            return when {
+                oldItem is PowerUsageItem.AppUsage && newItem is PowerUsageItem.AppUsage -> {
+                    oldItem.data.packageName == newItem.data.packageName
+                }
+                oldItem is PowerUsageItem.SceneHeader && newItem is PowerUsageItem.SceneHeader -> true
+                oldItem is PowerUsageItem.SnapshotBanner && newItem is PowerUsageItem.SnapshotBanner -> true
+                oldItem is PowerUsageItem.ShizukuGuide && newItem is PowerUsageItem.ShizukuGuide -> true
+                oldItem::class == newItem::class -> true
+                else -> false
+            }
+        }
+
+        override fun areContentsTheSame(oldItem: PowerUsageItem, newItem: PowerUsageItem): Boolean {
+            return when {
+                oldItem is PowerUsageItem.AppUsage && newItem is PowerUsageItem.AppUsage -> {
+                    val o = oldItem.data
+                    val n = newItem.data
+                    o.foregroundTimeMs == n.foregroundTimeMs &&
+                    o.backgroundTimeMs == n.backgroundTimeMs &&
+                    o.foregroundEnergyWh == n.foregroundEnergyWh &&
+                    o.backgroundEnergyWh == n.backgroundEnergyWh &&
+                    o.foregroundAvgWatts == n.foregroundAvgWatts &&
+                    o.backgroundAvgWatts == n.backgroundAvgWatts &&
+                    o.avgTemperature == n.avgTemperature &&
+                    o.maxTemperature == n.maxTemperature &&
+                    o.appName == n.appName
+                }
+                oldItem is PowerUsageItem.SceneHeader && newItem is PowerUsageItem.SceneHeader -> {
+                    oldItem.count == newItem.count && oldItem.showBackgroundStats == newItem.showBackgroundStats
+                }
+                oldItem is PowerUsageItem.SnapshotBanner && newItem is PowerUsageItem.SnapshotBanner -> {
+                    oldItem.hintText == newItem.hintText
+                }
+                oldItem is PowerUsageItem.ShizukuGuide && newItem is PowerUsageItem.ShizukuGuide -> {
+                    oldItem.title == newItem.title && oldItem.desc == newItem.desc && oldItem.actionText == newItem.actionText
+                }
+                else -> true
+            }
+        }
+
+        override fun getChangePayload(oldItem: PowerUsageItem, newItem: PowerUsageItem): Any? {
+            if (oldItem is PowerUsageItem.AppUsage && newItem is PowerUsageItem.AppUsage) {
+                return PAYLOAD_APP_METRICS
+            }
+            return null
+        }
+    }
+
+    // 基于异步后台线程 Diff 计算的列表差分驱动器，保障 120 FPS 丝滑动画与零掉帧
+    private val differ = androidx.recyclerview.widget.AsyncListDiffer(this, diffCallback)
+
+    // 提供对当前差分渲染列表的只读引用代理
+    val items: List<PowerUsageItem> get() = differ.currentList
 
     // 原始完整应用功耗数据集合
     private val allAppItems = mutableListOf<AppPowerUsageItem>()
@@ -355,7 +411,9 @@ class AppPowerUsageAdapter : RecyclerView.Adapter<RecyclerView.ViewHolder>() {
      * @return 条目对应的 ViewType 整型常量
      */
     override fun getItemViewType(position: Int): Int {
-        return when (items[position]) {
+        val list = differ.currentList
+        if (position !in list.indices) return TYPE_APP_USAGE
+        return when (list[position]) {
             is PowerUsageItem.FirstTimeSetup -> TYPE_FIRST_TIME_SETUP
             is PowerUsageItem.SnapshotBanner -> TYPE_SNAPSHOT_BANNER
             is PowerUsageItem.ShizukuGuide -> TYPE_SHIZUKU_GUIDE
@@ -457,6 +515,20 @@ class AppPowerUsageAdapter : RecyclerView.Adapter<RecyclerView.ViewHolder>() {
         }
     }
 
+    override fun onBindViewHolder(holder: RecyclerView.ViewHolder, position: Int, payloads: MutableList<Any>) {
+        if (payloads.isNotEmpty() && holder is AppViewHolder) {
+            val list = differ.currentList
+            if (position in list.indices) {
+                val item = list[position]
+                if (item is PowerUsageItem.AppUsage) {
+                    bindAppUsageMetricsPartial(holder, item.data)
+                    return
+                }
+            }
+        }
+        super.onBindViewHolder(holder, position, payloads)
+    }
+
     /**
      * 将数据实体绑定至对应的 ViewHolder 视图组件中。
      * 在绑定 App ViewHolder 时输出复用验证日志。
@@ -465,7 +537,9 @@ class AppPowerUsageAdapter : RecyclerView.Adapter<RecyclerView.ViewHolder>() {
      * @param position 列表项下标
      */
     override fun onBindViewHolder(holder: RecyclerView.ViewHolder, position: Int) {
-        when (val item = items[position]) {
+        val list = differ.currentList
+        if (position !in list.indices) return
+        when (val item = list[position]) {
             is PowerUsageItem.FirstTimeSetup -> {
                 bindFirstTimeSetup(holder as FirstTimeSetupViewHolder)
             }
@@ -498,8 +572,7 @@ class AppPowerUsageAdapter : RecyclerView.Adapter<RecyclerView.ViewHolder>() {
             }
             is PowerUsageItem.AppUsage -> {
                 val appHolder = holder as AppViewHolder
-                Log.d(TAG, "bind position=$position holder=${appHolder.hashCode()}")
-                val isLastRow = position == items.size - 1 || (position + 1 < items.size && items[position + 1] !is PowerUsageItem.AppUsage)
+                val isLastRow = position == list.size - 1 || (position + 1 < list.size && list[position + 1] !is PowerUsageItem.AppUsage)
                 bindAppUsage(appHolder, item.data, isLastRow)
             }
             is PowerUsageItem.ChargingContent -> {
@@ -513,7 +586,7 @@ class AppPowerUsageAdapter : RecyclerView.Adapter<RecyclerView.ViewHolder>() {
      *
      * @return 条目数量
      */
-    override fun getItemCount(): Int = items.size
+    override fun getItemCount(): Int = differ.currentList.size
 
     // ==================== 具体条目绑定逻辑 ====================
 
@@ -1186,12 +1259,16 @@ class AppPowerUsageAdapter : RecyclerView.Adapter<RecyclerView.ViewHolder>() {
         }
         with(holder.binding) {
             val targetIconPx = (holder.itemView.context.resources.displayMetrics.density * 42f).toInt()
-            val cachedBitmap = DrawableBitmapCache.getOrLoadBitmap(
+            val cachedBitmap = DrawableBitmapCache.getOrLoadBitmapAsync(
                 holder.itemView.context,
                 item.packageName,
                 targetIconPx,
                 item.icon
-            )
+            ) { loadedBmp ->
+                if (holder.binding.tvAppName.text == item.appName && !loadedBmp.isRecycled) {
+                    holder.binding.ivAppIcon.setImageBitmap(loadedBmp)
+                }
+            }
             if (cachedBitmap != null && !cachedBitmap.isRecycled) {
                 ivAppIcon.setImageBitmap(cachedBitmap)
             } else if (item.isUninstalledApp()) {
@@ -1209,6 +1286,63 @@ class AppPowerUsageAdapter : RecyclerView.Adapter<RecyclerView.ViewHolder>() {
             }
 
             tvAppName.text = item.appName
+            val pwrStr = if (showBackgroundStats) {
+                item.getFormattedCombinedAvgWatts()
+            } else {
+                item.getFormattedForegroundAvgWatts()
+            }
+            val avgTempStr = if (item.avgTemperature > 0f) {
+                String.format(Locale.getDefault(), "%.1f℃", item.avgTemperature)
+            } else {
+                "--"
+            }
+            val maxTempStr = if (item.maxTemperature > 0f) {
+                String.format(Locale.getDefault(), "Max:%.1f℃", item.maxTemperature)
+            } else {
+                "Max:--"
+            }
+            tvAvgInfo.setUnitText("Avg:$pwrStr, $avgTempStr | $maxTempStr")
+
+            val effectiveTotalEnergy = if (cachedTotalAppEnergyWh > 0f) {
+                cachedTotalAppEnergyWh
+            } else {
+                displayAppItems.sumOf { it.getForegroundEnergyValue().toDouble() }.toFloat()
+            }
+            tvAppEnergy.setUnitText(formatAppEnergyWithPercentage(item, effectiveTotalEnergy, currentDisplayUnit))
+
+            val hasFg = item.foregroundTimeMs > 0L
+            val hasBg = showBackgroundStats && item.backgroundTimeMs > 0L
+
+            if (hasFg) {
+                layoutFgDuration.visibility = View.VISIBLE
+                tvFgDuration.setUnitText(item.getFormattedDuration())
+            } else if (!hasBg) {
+                layoutFgDuration.visibility = View.VISIBLE
+                tvFgDuration.setUnitText("00s")
+            } else {
+                layoutFgDuration.visibility = View.GONE
+            }
+
+            tvDurationDivider.visibility = if (hasFg && hasBg) View.VISIBLE else View.GONE
+
+            if (hasBg) {
+                layoutBgDuration.visibility = View.VISIBLE
+                tvBgDuration.setUnitText(item.getFormattedBackgroundDuration())
+            } else {
+                layoutBgDuration.visibility = View.GONE
+            }
+        }
+    }
+
+    /**
+     * 局部增量刷新应用条目的瞬时功耗、温度、能量与时长指标（Payload 优化）。
+     * 避免重新触发图标解码、标题重绘与 Drawable 重新设置，实现 120 FPS 极限流畅。
+     *
+     * @param holder 应用条目 ViewHolder
+     * @param item 应用能耗数据实体
+     */
+    private fun bindAppUsageMetricsPartial(holder: AppViewHolder, item: AppPowerUsageItem) {
+        with(holder.binding) {
             val pwrStr = if (showBackgroundStats) {
                 item.getFormattedCombinedAvgWatts()
             } else {
@@ -1343,46 +1477,46 @@ class AppPowerUsageAdapter : RecyclerView.Adapter<RecyclerView.ViewHolder>() {
     var isPureAppListMode: Boolean = false
 
     /**
-     * 重新构建平铺的 RecyclerView 条目列表并安全通知刷新。
+     * 重新构建平铺的 RecyclerView 条目列表并通过 AsyncListDiffer 驱动后台异步差分与局部增量刷新。
      */
     fun rebuildItems() {
-        items.clear()
+        val newItems = mutableListOf<PowerUsageItem>()
         if (isPureAppListMode) {
             for (app in displayAppItems) {
-                items.add(PowerUsageItem.AppUsage(app))
+                newItems.add(PowerUsageItem.AppUsage(app))
             }
-            safeNotifyDataSetChanged()
+            differ.submitList(newItems)
             return
         }
 
         if (showFirstTimeSetup) {
-            items.add(PowerUsageItem.FirstTimeSetup)
-            safeNotifyDataSetChanged()
+            newItems.add(PowerUsageItem.FirstTimeSetup)
+            differ.submitList(newItems)
             return
         }
 
         if (currentDisplayTab == 1) {
-            items.add(PowerUsageItem.ChargingContent)
-            safeNotifyDataSetChanged()
+            newItems.add(PowerUsageItem.ChargingContent)
+            differ.submitList(newItems)
             return
         }
 
         // 耗电模式
         if (showSnapshotBanner) {
-            items.add(PowerUsageItem.SnapshotBanner(snapshotHintText))
+            newItems.add(PowerUsageItem.SnapshotBanner(snapshotHintText))
         }
         if (showShizukuGuide) {
-            items.add(PowerUsageItem.ShizukuGuide(shizukuGuideTitle, shizukuGuideDesc, shizukuGuideActionText))
+            newItems.add(PowerUsageItem.ShizukuGuide(shizukuGuideTitle, shizukuGuideDesc, shizukuGuideActionText))
         }
-        items.add(PowerUsageItem.CapacityOverview)
-        items.add(PowerUsageItem.DischargeSpeedMetrics)
-        items.add(PowerUsageItem.SleepAwakeMetrics)
-        items.add(PowerUsageItem.UsageOverview)
-        items.add(PowerUsageItem.SceneHeader(displayAppItems.size, showBackgroundStats))
+        newItems.add(PowerUsageItem.CapacityOverview)
+        newItems.add(PowerUsageItem.DischargeSpeedMetrics)
+        newItems.add(PowerUsageItem.SleepAwakeMetrics)
+        newItems.add(PowerUsageItem.UsageOverview)
+        newItems.add(PowerUsageItem.SceneHeader(displayAppItems.size, showBackgroundStats))
         for (app in displayAppItems) {
-            items.add(PowerUsageItem.AppUsage(app))
+            newItems.add(PowerUsageItem.AppUsage(app))
         }
-        safeNotifyDataSetChanged()
+        differ.submitList(newItems)
     }
 
     /**
