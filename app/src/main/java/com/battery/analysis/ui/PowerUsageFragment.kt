@@ -1913,7 +1913,7 @@ class PowerUsageFragment : Fragment() {
         val totalCapacityWh = snapshot.totalEnergyWh
             ?: powerManager.getEffectiveDeviceCapacityMah().takeIf { it > 0f }?.let {
                 BatteryEnergyCalculator.calculateTotalEnergyWh(it)
-            } ?: (BatteryEnergyCalculator.DEFAULT_CAPACITY_MAH * BatteryEnergyCalculator.DEFAULT_NOMINAL_VOLTAGE_VOLTS / 1000f)
+            } ?: BatteryEnergyCalculator.DEFAULT_NOMINAL_ENERGY_WH
 
         val (onSessionRate, _) = PowerDischargeMetricsViewBinder.calculateSessionDischargeRate(
             BatteryEnergyCalculator.ROW_SCREEN_ON, totalCapacityWh, overview
@@ -2334,7 +2334,7 @@ class PowerUsageFragment : Fragment() {
             ?: powerManager.getTotalEnergyWh()
             ?: powerManager.getEffectiveDeviceCapacityMah().takeIf { it > 0f }?.let {
                 BatteryEnergyCalculator.calculateTotalEnergyWh(it)
-            } ?: (BatteryEnergyCalculator.DEFAULT_CAPACITY_MAH * BatteryEnergyCalculator.DEFAULT_NOMINAL_VOLTAGE_VOLTS / 1000f)
+            } ?: BatteryEnergyCalculator.DEFAULT_NOMINAL_ENERGY_WH
         val baseTotalEnergy = totalCapacityWh?.takeIf { it > 0f }
 
         // 异步预计算时间轴前缀和索引数据，赋能 120Hz 游标探查零延迟无感联动
@@ -2690,7 +2690,7 @@ class PowerUsageFragment : Fragment() {
             ?: powerManager.getTotalEnergyWh()
             ?: powerManager.getEffectiveDeviceCapacityMah().takeIf { it > 0f }?.let {
                 BatteryEnergyCalculator.calculateTotalEnergyWh(it)
-            } ?: (BatteryEnergyCalculator.DEFAULT_CAPACITY_MAH * BatteryEnergyCalculator.DEFAULT_NOMINAL_VOLTAGE_VOLTS / 1000f)
+            } ?: BatteryEnergyCalculator.DEFAULT_NOMINAL_ENERGY_WH
         val baseTotalEnergy = totalCapacityWh?.takeIf { it > 0f }
 
         val onEnergyRatioStr = if (baseTotalEnergy != null) {

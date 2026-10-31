@@ -32,6 +32,12 @@ object BatteryEnergyCalculator {
     // 默认锂电池标称工作电压（单位：V，标准锂离子/锂聚合物电池标称中位放电电压为 3.85V）
     const val DEFAULT_NOMINAL_VOLTAGE_VOLTS = 3.85f
 
+    // 默认锂电池标称出厂容量（单位：mAh，主流智能手机中位标称容量为 5000mAh）
+    const val DEFAULT_NOMINAL_CAPACITY_MAH = 5000f
+
+    // 默认锂电池标称满电能量（单位：Wh，5000mAh * 3.85V / 1000 = 19.25Wh）
+    const val DEFAULT_NOMINAL_ENERGY_WH = 19.25f
+
     // 核心功耗与放电速度卡片行类型常量标识（与 PowerUsageFragment 严格保持一致：0为亮屏，1为息屏，2为全局）
     const val ROW_SCREEN_ON = 0
     const val ROW_SCREEN_OFF = 1

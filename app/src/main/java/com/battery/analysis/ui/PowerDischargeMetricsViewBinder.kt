@@ -590,7 +590,7 @@ object PowerDischargeMetricsViewBinder {
     ): Pair<Float?, Long?> {
         if (overview == null) return Pair(null, null)
         val nominalCapacity = totalCapacityWh?.takeIf { it > 0f }
-            ?: (BatteryEnergyCalculator.DEFAULT_CAPACITY_MAH * BatteryEnergyCalculator.DEFAULT_NOMINAL_VOLTAGE_VOLTS / 1000f)
+            ?: BatteryEnergyCalculator.DEFAULT_NOMINAL_ENERGY_WH
         val rollingBuffer = RollingDischargeBuffer.getInstanceOrNull()
         return when (rowType) {
             BatteryEnergyCalculator.ROW_SCREEN_ON -> {
@@ -664,7 +664,7 @@ object PowerDischargeMetricsViewBinder {
         durationMs: Long
     ): Float? {
         val safeCapWh = totalCapacityWh?.takeIf { it.isFinite() && it > 0f }
-            ?: (BatteryEnergyCalculator.DEFAULT_CAPACITY_MAH * BatteryEnergyCalculator.DEFAULT_NOMINAL_VOLTAGE_VOLTS / 1000f)
+            ?: BatteryEnergyCalculator.DEFAULT_NOMINAL_ENERGY_WH
         if (!powerWatts.isFinite() || powerWatts <= 0f || durationMs <= 0L || powerWatts > 25.0f) {
             return null
         }
