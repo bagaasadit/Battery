@@ -2123,17 +2123,24 @@ class PowerUsageFragment : Fragment() {
 
         loadDataJob?.cancel()
         loadDataJob = viewLifecycleOwner.lifecycleScope.launch(Dispatchers.IO) {
-            if (currentMode == PowerUsageManager.MODE_SHIZUKU && powerManager.isShizukuAuthorized()) {
-                powerManager.grantUsageStatsPermissionViaShizuku()
-            }
-            val fullPackage = powerManager.loadPowerData(currentMode, enableBackgroundStats = isBgStatsEnabled)
-            val timelineState = powerManager.buildTimelineState(fullPackage)
+            try {
+                if (currentMode == PowerUsageManager.MODE_SHIZUKU && powerManager.isShizukuAuthorized()) {
+                    powerManager.grantUsageStatsPermissionViaShizuku()
+                }
+                val fullPackage = powerManager.loadPowerData(currentMode, enableBackgroundStats = isBgStatsEnabled)
+                val timelineState = powerManager.buildTimelineState(fullPackage)
 
-            withContext(Dispatchers.Main) {
-                if (_binding == null) return@withContext
-                checkNormalPermissionBanner()
-                renderFullPowerData(fullPackage, timelineState)
-                binding.swipeRefreshLayout.isRefreshing = false
+                withContext(Dispatchers.Main) {
+                    if (_binding == null) return@withContext
+                    checkNormalPermissionBanner()
+                    renderFullPowerData(fullPackage, timelineState)
+                    binding.swipeRefreshLayout.isRefreshing = false
+                }
+            } catch (e: Throwable) {
+                android.util.Log.e("PowerUsageFragment", "loadData failed: ${e.message}", e)
+                withContext(Dispatchers.Main) {
+                    _binding?.let { it.swipeRefreshLayout.isRefreshing = false }
+                }
             }
         }
     }

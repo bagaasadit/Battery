@@ -146,8 +146,9 @@ class ShizukuBatteryStatsParser(private val context: Context) {
         localHistoryTempPoints: List<Pair<Long, Float>> = emptyList(),
         enableBackgroundStats: Boolean = false
     ): BatteryStatsResult {
-        // 1. 通过全局缓存与异步预热机制极速加载全系统所有应用的 UID 到包名映射表
-        val uidPkgMap = loadUidPackageMap()
+        return try {
+            // 1. 通过全局缓存与异步预热机制极速加载全系统所有应用的 UID 到包名映射表
+            val uidPkgMap = loadUidPackageMap()
 
         val now = System.currentTimeMillis()
         // 2. 检查会话级短时缓存（2.5 秒内高频连击防抖，避免瞬间重复拉起耗电命令）
@@ -472,12 +473,7 @@ class ShizukuBatteryStatsParser(private val context: Context) {
                         val resolvedPkg = if (!directPkg.isNullOrEmpty() && directPkg.contains(".") && !isExplicitlyUninstalled) {
                             directPkg
                         } else {
-                            uidPkgMap[uid]
-                                ?: (if (uid > 0) cachedUidPkgMap[uid] else null)
-                                ?: (if (uid > 0) AppIconCacheManager.getPackageNameByUid(context, uid) else null)
-                                ?: (if (uid > 0) pm.getPackagesForUid(uid)?.firstOrNull() else null)
-                                ?: (if (uid > 0) pm.getNameForUid(uid)?.let { if (it.contains(":")) it.substringAfter(":") else it } else null)
-                                ?: (if (uid > 0) resolvePackageNameForUid(uid) else null)
+                            safeResolvePackageName(pm, uid, uidPkgMap)
                         }
 
                         // 核心规则：区分用户应用空间（appId >= 10000）与系统底层守护进程（appId < 10000）
@@ -769,7 +765,17 @@ class ShizukuBatteryStatsParser(private val context: Context) {
             totalWakeupCount = summary.totalWakeupCount,
             screenOnCount = summary.screenOnCount
         )
+    } catch (e: Throwable) {
+        android.util.Log.e("ShizukuBatteryStatsParser", "parseChargedBatteryStats error: ${e.message}", e)
+        BatteryStatsResult(
+            capacityMah = 0f,
+            computedDrainMah = 0f,
+            dischargeDurationMs = 0L,
+            screenOnDurationMs = 0L,
+            appList = emptyList()
+        )
     }
+}
 
     /**
      * 异步在后台线程中通过 Shizuku 执行 pm list packages -U 并合并至全局 UID 缓存，避免冷启动下拉刷新被此命令阻塞数秒。
@@ -815,7 +821,10 @@ class ShizukuBatteryStatsParser(private val context: Context) {
     private fun loadUidPackageMapViaShizukuAsync() {
         ioScope.launch {
             try {
-                val output = executeShizukuCommand("pm list packages -U")
+                var output = executeShizukuCommand("pm list packages -U --user all")
+                if (output.isBlank() || output.contains("Error:", ignoreCase = true)) {
+                    output = executeShizukuCommand("pm list packages -U")
+                }
                 if (output.isNotBlank()) {
                     val pattern = Pattern.compile("package:([^\\s]+)\\s+uid:(\\d+)")
                     for (line in output.split('\n')) {
@@ -824,11 +833,17 @@ class ShizukuBatteryStatsParser(private val context: Context) {
                             val pkg = matcher.group(1) ?: continue
                             val uid = matcher.group(2)?.toIntOrNull() ?: continue
                             cachedUidPkgMap[uid] = pkg
+                            if (uid >= 100000) {
+                                val baseUid = uid % 100000
+                                if (!cachedUidPkgMap.containsKey(baseUid)) {
+                                    cachedUidPkgMap[baseUid] = pkg
+                                }
+                            }
                         }
                     }
                     persistUidPackageMapAsync()
                 }
-            } catch (_: Exception) {
+            } catch (_: Throwable) {
             }
         }
     }
@@ -1292,7 +1307,7 @@ class ShizukuBatteryStatsParser(private val context: Context) {
                 val bgWorkMs = maxOf(totalCpu, bgCpu) + wakeMs
                 if (bgWorkMs <= 0L) continue
 
-                val pkgName = uidPkg[uid] ?: try { pm.getPackagesForUid(uid)?.firstOrNull() } catch (_: Exception) { null }
+                val pkgName = safeResolvePackageName(pm, uid, uidPkg)
                 if (pkgName.isNullOrBlank() || existingMap.containsKey(pkgName)) continue
 
                 if (!isUserInstalledApp(pkgName)) continue
@@ -1803,6 +1818,65 @@ class ShizukuBatteryStatsParser(private val context: Context) {
         rawBatterystatsCacheTime = 0L
         unresolvedUidSet.clear()
         executeShizukuShellCommand("dumpsys batterystats --reset")
+    }
+
+    /**
+     * 安全解析 UID 对应的包名，完整适配多用户、分身双开（如小米 HyperOS 用户 10/11）、
+     * 工作资料（Work Profile）等跨用户 UID，防御 Android 14/15 严格的安全异常（SecurityException）。
+     */
+    private fun safeResolvePackageName(pm: PackageManager, uid: Int, uidPkgMap: Map<Int, String>): String? {
+        if (uid <= 0) return null
+
+        // 1. 直查内存 UID 映射表
+        uidPkgMap[uid]?.let { return it }
+        cachedUidPkgMap[uid]?.let { return it }
+
+        // 2. 多用户/分身应用映射（如 HyperOS user 10/11 双开，UID 为 1110462 等）
+        if (uid >= 100000) {
+            val baseAppId = uid % 100000
+            val normalizedUid = if (baseAppId >= 10000) baseAppId else (10000 + baseAppId)
+            uidPkgMap[normalizedUid]?.let { return it }
+            cachedUidPkgMap[normalizedUid]?.let { return it }
+            uidPkgMap[baseAppId]?.let { return it }
+            cachedUidPkgMap[baseAppId]?.let { return it }
+        }
+
+        // 3. 本地磁盘持久化仓库
+        AppIconCacheManager.getPackageNameByUid(context, uid)?.let { return it }
+        if (uid >= 100000) {
+            AppIconCacheManager.getPackageNameByUid(context, uid % 100000)?.let { return it }
+        }
+
+        // 4. PackageManager getPackagesForUid（严格包裹 try-catch 防御跨用户 SecurityException）
+        try {
+            pm.getPackagesForUid(uid)?.firstOrNull()?.let { return it }
+        } catch (_: Throwable) {}
+
+        if (uid >= 100000) {
+            try {
+                pm.getPackagesForUid(uid % 100000)?.firstOrNull()?.let { return it }
+            } catch (_: Throwable) {}
+        }
+
+        // 5. PackageManager getNameForUid
+        try {
+            pm.getNameForUid(uid)?.let {
+                val clean = if (it.contains(":")) it.substringAfter(":") else it
+                if (clean.isNotBlank()) return clean
+            }
+        } catch (_: Throwable) {}
+
+        if (uid >= 100000) {
+            try {
+                pm.getNameForUid(uid % 100000)?.let {
+                    val clean = if (it.contains(":")) it.substringAfter(":") else it
+                    if (clean.isNotBlank()) return clean
+                }
+            } catch (_: Throwable) {}
+        }
+
+        // 6. 兜底解析
+        return resolvePackageNameForUid(uid)
     }
 
     /**

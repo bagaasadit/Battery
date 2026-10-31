@@ -3966,15 +3966,20 @@ class PowerUsageManager private constructor(private val context: Context) {
 
         // 1. Shizuku 模式且已获得授权
         if (mode == MODE_SHIZUKU && isShizukuAuthorized()) {
-            val stats = shizukuParser.parseChargedBatteryStats(
-                batteryVoltageVolts = batterySnapshot.voltageVolts,
-                batteryTempCelsius = batterySnapshot.temperature,
-                unplugTime = unplugTime,
-                localHistoryTempPoints = getDischargeTempPoints(),
-                enableBackgroundStats = enableBackgroundStats
-            )
+            val stats = try {
+                shizukuParser.parseChargedBatteryStats(
+                    batteryVoltageVolts = batterySnapshot.voltageVolts,
+                    batteryTempCelsius = batterySnapshot.temperature,
+                    unplugTime = unplugTime,
+                    localHistoryTempPoints = getDischargeTempPoints(),
+                    enableBackgroundStats = enableBackgroundStats
+                )
+            } catch (e: Throwable) {
+                android.util.Log.e("PowerUsageManager", "parseChargedBatteryStats failed: ${e.message}", e)
+                null
+            }
 
-            if (stats.appList.isNotEmpty() || stats.dischargeDurationMs > 0L) {
+            if (stats != null && (stats.appList.isNotEmpty() || stats.dischargeDurationMs > 0L)) {
                 // 若探测到底层真实拔电时刻与电量，动态同步至本地存储，纠正首次进入缺乏记录时的错误默认值
                 var effectiveUnplugLevel = unplugLevel
                 var effectiveUnplugTime = unplugTime
