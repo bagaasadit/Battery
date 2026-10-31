@@ -15,6 +15,7 @@ import android.os.Build
 import android.os.IBinder
 import android.os.PowerManager
 import android.os.SystemClock
+import android.util.Log
 import android.widget.RemoteViews
 import androidx.core.app.NotificationCompat
 import kotlin.math.abs
@@ -1374,6 +1375,7 @@ class BatteryMonitorService : Service() {
     }
 
     companion object {
+        private const val TAG = "BatteryMonitorService"
         const val CHANNEL_ID = "channel_battery_monitor"
         const val CHANNEL_ID_SILENT = "channel_battery_monitor_silent"
         const val NOTIFICATION_ID = 10001
