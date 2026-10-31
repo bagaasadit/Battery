@@ -670,17 +670,6 @@ class PowerUsageDbHelper private constructor(context: Context) :
             isScreenOffDecomposedAvailable = if (indices.idxDecomposed >= 0) c.getInt(indices.idxDecomposed) == 1 else true
         )
     }
-            isCompleted = if (idxCompleted >= 0) c.getInt(idxCompleted) == 1 else true,
-            lastCheckpointTime = if (idxCheckpoint >= 0) c.getLong(idxCheckpoint) else 0L,
-            screenOffAwakeEnergyWh = if (idxAwakeWh >= 0) c.getFloat(idxAwakeWh) else 0f,
-            screenOffDeepSleepEnergyWh = if (idxSleepWh >= 0) c.getFloat(idxSleepWh) else 0f,
-            screenOffAwakeDurationMs = if (idxAwakeDur >= 0) c.getLong(idxAwakeDur) else 0L,
-            screenOffDeepSleepDurationMs = if (idxSleepDur >= 0) c.getLong(idxSleepDur) else 0L,
-            screenOffAwakeDrainMah = if (idxAwakeMah >= 0) c.getFloat(idxAwakeMah) else 0f,
-            screenOffDeepSleepDrainMah = if (idxSleepMah >= 0) c.getFloat(idxSleepMah) else 0f,
-            isScreenOffDecomposedAvailable = if (idxDecomposed >= 0) c.getInt(idxDecomposed) == 1 else true
-        )
-    }
 
     /**
      * 根据主键 ID 删除指定的单条耗电历史记录。
