@@ -370,13 +370,22 @@ class PowerUsageFragment : Fragment() {
 
         checkFirstTimeConfiguration()
 
-        // 动态注册充放电与电池状态广播
+        // 动态注册充放电与电池状态广播（适配 Android 14+ 明确指定 RECEIVER_EXPORTED）
         val powerFilter = IntentFilter().apply {
             addAction(Intent.ACTION_POWER_CONNECTED)
             addAction(Intent.ACTION_POWER_DISCONNECTED)
             addAction(Intent.ACTION_BATTERY_CHANGED)
         }
-        requireContext().registerReceiver(powerStateReceiver, powerFilter)
+        try {
+            androidx.core.content.ContextCompat.registerReceiver(
+                requireContext(),
+                powerStateReceiver,
+                powerFilter,
+                androidx.core.content.ContextCompat.RECEIVER_EXPORTED
+            )
+        } catch (e: Throwable) {
+            android.util.Log.e("PowerUsageFragment", "Register powerStateReceiver failed: ${e.message}", e)
+        }
 
         // 初始智能感知：检测是否在充电，智能决定初始展示界面并同步底栏页签
         val isCharging = chargingManager.isCharging()

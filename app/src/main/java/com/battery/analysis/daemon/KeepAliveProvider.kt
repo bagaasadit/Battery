@@ -23,13 +23,13 @@ class KeepAliveProvider : ContentProvider() {
      */
     override fun onCreate(): Boolean {
         val ctx = context ?: return true
-        // 唤醒进程后，若用户配置了开启后台监控，立即恢复前台服务
+        // 唤醒进程后，若用户配置了开启后台监控，尝试恢复前台服务（具备全面防崩保护）
         try {
             if (BatteryMonitorService.shouldServiceRun(ctx)) {
                 BatteryMonitorService.start(ctx)
             }
-        } catch (e: Exception) {
-            e.printStackTrace()
+        } catch (e: Throwable) {
+            android.util.Log.w("KeepAliveProvider", "Start service from KeepAliveProvider failed: ${e.message}")
         }
         return true
     }

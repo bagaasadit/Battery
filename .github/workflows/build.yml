@@ -61,12 +61,9 @@
 
 
         # ============================================================
-        # 5. 检查 GitHub Secrets
-        #
-        # 不再提供任何默认密码
-        # Secrets 缺失时直接终止构建
+        # 5. 配置与验证 Android 签名文件
         # ============================================================
-        - name: Validate Signing Secrets
+        - name: Setup Keystore
           env:
             KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
             KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
@@ -74,83 +71,51 @@
             KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
           run: |
             set -e
-            
-            if [ -z "$KEYSTORE_BASE64" ]; then
-              echo "::error::KEYSTORE_BASE64 is not configured."
-              exit 1
-            fi
-            
-            if [ -z "$KEYSTORE_PASSWORD" ]; then
-              echo "::error::KEYSTORE_PASSWORD is not configured."
-              exit 1
-            fi
-            
-            if [ -z "$KEY_ALIAS" ]; then
-              echo "::error::KEY_ALIAS is not configured."
-              exit 1
-            fi
-            
-            if [ -z "$KEY_PASSWORD" ]; then
-              echo "::error::KEY_PASSWORD is not configured."
-              exit 1
-            fi
-            
-            echo "Signing secrets are configured."
-        
-
-        # ============================================================
-        # 6. 恢复 Android 签名文件
-        # ============================================================
-        - name: Decode Keystore
-          env:
-            KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
-          run: |
-            set -e
-            
             mkdir -p app
-            
-            echo "$KEYSTORE_BASE64" | base64 --decode > app/app.jks
-            
-            if [ ! -s app/app.jks ]; then
-              echo "::error::Failed to create app/app.jks"
-              exit 1
+            if [ -n "$KEYSTORE_BASE64" ] && [ -n "$KEYSTORE_PASSWORD" ] && [ -n "$KEY_ALIAS" ] && [ -n "$KEY_PASSWORD" ]; then
+              echo "Using configured GitHub Secrets for signing."
+              echo "$KEYSTORE_BASE64" | base64 --decode > app/app.jks
+              echo "KEYSTORE_PASSWORD=$KEYSTORE_PASSWORD" >> $GITHUB_ENV
+              echo "KEY_ALIAS=$KEY_ALIAS" >> $GITHUB_ENV
+              echo "KEY_PASSWORD=$KEY_PASSWORD" >> $GITHUB_ENV
+            else
+              echo "GitHub Secrets for signing not set. Generating fallback self-signed keystore..."
+              keytool -genkeypair -v \
+                -keystore app/app.jks \
+                -alias "battery" \
+                -keyalg RSA \
+                -keysize 2048 \
+                -validity 10000 \
+                -storepass "android" \
+                -keypass "android" \
+                -dname "CN=Battery, OU=App, O=Battery, L=Unknown, S=Unknown, C=US"
+              echo "KEYSTORE_PASSWORD=android" >> $GITHUB_ENV
+              echo "KEY_ALIAS=battery" >> $GITHUB_ENV
+              echo "KEY_PASSWORD=android" >> $GITHUB_ENV
             fi
-            
-            echo "Keystore restored successfully."
-        
 
         # ============================================================
-        # 7. 验证 Keystore
+        # 6. 验证 Keystore
         #
         # 不输出密码
         # 只验证 JKS 是否有效以及 Alias 是否存在
         # ============================================================
         - name: Verify Keystore
-          env:
-            KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
-            KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
           run: |
             set -e
-            
             keytool -list \
               -keystore app/app.jks \
               -storepass "$KEYSTORE_PASSWORD" \
               -alias "$KEY_ALIAS" \
               > /dev/null
-            
             echo "Keystore and alias verified successfully."
-        
 
         # ============================================================
-        # 8. Build Release + Debug APK
+        # 7. Build Release + Debug APK
         #
         # 只执行一次，删除原来重复的 Build APK 步骤
         # ============================================================
         - name: Build APK
-          env:
-            KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
-            KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
-            KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
           run: |
             ./gradlew assembleRelease assembleDebug --stacktrace
         

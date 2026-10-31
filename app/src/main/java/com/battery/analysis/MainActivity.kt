@@ -112,8 +112,12 @@ class MainActivity : AppCompatActivity() {
         // 0. 初始化并应用保存的语言配置
         com.battery.analysis.manager.LanguageManager.initLanguage(this)
 
-        // 检测应用是否覆盖升级安装，自动执行数据迁移与断点孤儿会话封顶
-        com.battery.analysis.manager.AppUpgradeManager.getInstance(this).checkAndPerformMigration()
+        // 检测应用是否覆盖升级安装，自动执行数据迁移与断点孤儿会话封顶（加入安全容错保护）
+        try {
+            com.battery.analysis.manager.AppUpgradeManager.getInstance(this).checkAndPerformMigration()
+        } catch (e: Throwable) {
+            android.util.Log.e("MainActivity", "AppUpgradeManager migration error: ${e.message}", e)
+        }
 
         val savedThemeMode = prefs.getInt("theme_mode", AppCompatDelegate.MODE_NIGHT_FOLLOW_SYSTEM)
         AppCompatDelegate.setDefaultNightMode(savedThemeMode)
@@ -125,34 +129,59 @@ class MainActivity : AppCompatActivity() {
         //setupBackPressHandler()
 
         // 3. 注册 Shizuku 监听器
-        Shizuku.addRequestPermissionResultListener(requestPermissionResultListener)
-        Shizuku.addBinderReceivedListenerSticky(binderReceivedListener)
-        Shizuku.addBinderDeadListener(binderDeadListener)
+        try {
+            Shizuku.addRequestPermissionResultListener(requestPermissionResultListener)
+            Shizuku.addBinderReceivedListenerSticky(binderReceivedListener)
+            Shizuku.addBinderDeadListener(binderDeadListener)
+        } catch (e: Throwable) {
+            android.util.Log.w("MainActivity", "Shizuku listener registration error: ${e.message}", e)
+        }
 
-        // 4. 动态注册充拔电广播接收器（前台双保险，防止部分机型后台静态广播被阻断）
+        // 4. 动态注册充拔电广播接收器（前台双保险，支持 Android 14+ 明确指定 RECEIVER_EXPORTED）
         val unplugFilter = android.content.IntentFilter().apply {
             addAction(android.content.Intent.ACTION_POWER_DISCONNECTED)
             addAction(android.content.Intent.ACTION_POWER_CONNECTED)
         }
-        registerReceiver(batteryUnplugReceiver, unplugFilter)
+        try {
+            androidx.core.content.ContextCompat.registerReceiver(
+                this,
+                batteryUnplugReceiver,
+                unplugFilter,
+                androidx.core.content.ContextCompat.RECEIVER_EXPORTED
+            )
+        } catch (e: Throwable) {
+            android.util.Log.e("MainActivity", "Register batteryUnplugReceiver failed: ${e.message}", e)
+        }
 
         // 5. 初始只刷新系统普通 API（因为默认处于系统 API 视图）
-        updateShizukuStatusState()
-        viewModel.refreshNormalApi(this)
+        try {
+            updateShizukuStatusState()
+            viewModel.refreshNormalApi(this)
+        } catch (e: Throwable) {
+            android.util.Log.e("MainActivity", "Refresh normal API failed: ${e.message}", e)
+        }
 
         // 6. 注册断开电源自动记录快照监听器，实时刷新历史数据流
         BatteryUnplugReceiver.onRecordInsertedListener = {
             viewModel.loadHistoryRecords(this)
         }
 
-        // 7. 若启用了充放电统计，才执行充放电断层自愈对齐检测
+        // 7. 若启用了充放电统计，才执行充放电断层自愈对齐检测（加入完整容错，防止 DB 异常阻断启动）
         if (com.battery.analysis.service.BatteryMonitorService.isChargeDischargeStatsEnabled(this)) {
-            com.battery.analysis.manager.ChargingStatsManager.getInstance(this).checkAndReconcileChargingState()
-            com.battery.analysis.manager.PowerUsageManager.getInstance(this).checkAndReconcileDischargeState()
+            try {
+                com.battery.analysis.manager.ChargingStatsManager.getInstance(this).checkAndReconcileChargingState()
+                com.battery.analysis.manager.PowerUsageManager.getInstance(this).checkAndReconcileDischargeState()
+            } catch (e: Throwable) {
+                android.util.Log.e("MainActivity", "checkAndReconcileState failed: ${e.message}", e)
+            }
         }
 
         // 8. 检查并按需启动后台电池监控前台服务
-        checkAndStartBatteryMonitorService()
+        try {
+            checkAndStartBatteryMonitorService()
+        } catch (e: Throwable) {
+            android.util.Log.e("MainActivity", "checkAndStartBatteryMonitorService failed: ${e.message}", e)
+        }
     }
 
     /**

@@ -532,10 +532,8 @@ class BatteryMonitorService : Service() {
             } else {
                 startForeground(NOTIFICATION_ID, notification)
             }
-        } catch (_: Exception) {
-            try {
-                startForeground(NOTIFICATION_ID, notification)
-            } catch (_: Exception) {}
+        } catch (e: Throwable) {
+            Log.e(TAG, "safeStartForeground failed: ${e.message}", e)
         }
     }
 
@@ -592,7 +590,16 @@ class BatteryMonitorService : Service() {
                 addAction(PowerManager.ACTION_DEVICE_IDLE_MODE_CHANGED)
             }
         }
-        registerReceiver(powerReceiver, filter)
+        try {
+            androidx.core.content.ContextCompat.registerReceiver(
+                this,
+                powerReceiver,
+                filter,
+                androidx.core.content.ContextCompat.RECEIVER_EXPORTED
+            )
+        } catch (e: Throwable) {
+            Log.e(TAG, "Register powerReceiver failed: ${e.message}", e)
+        }
 
         // 无论服务启动时处于充电还是放电状态，均自动开启全时态自适应采样轮询
         startMonitorSamplingLoop()
@@ -1674,8 +1681,8 @@ class BatteryMonitorService : Service() {
                     context.startService(intent)
                 }
                 setServiceEnabled(context, true)
-            } catch (e: Exception) {
-                e.printStackTrace()
+            } catch (e: Throwable) {
+                Log.e(TAG, "Start BatteryMonitorService failed: ${e.message}", e)
             }
         }
 

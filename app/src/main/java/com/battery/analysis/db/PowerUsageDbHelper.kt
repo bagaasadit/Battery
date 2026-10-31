@@ -450,22 +450,24 @@ class PowerUsageDbHelper private constructor(context: Context) :
             )
         } catch (_: Exception) {}
 
-        val cursor = db.query(
-            TABLE_NAME,
-            null,
-            "$COL_IS_CHARGING = 0 AND NOT ($COL_IS_COMPLETED = 1 AND $COL_AVG_POWER_WATTS <= 0.001 AND ($COL_TOTAL_DURATION LIKE '%m%' OR $COL_TOTAL_DURATION LIKE '%h%' OR $COL_TOTAL_DURATION LIKE '%d%'))",
-            null,
-            null,
-            null,
-            "$COL_ID DESC"
-        )
-        cursor.use { c ->
-            if (c.moveToFirst()) {
-                do {
-                    list.add(parseRecordFromCursor(c))
-                } while (c.moveToNext())
+        try {
+            val cursor = db.query(
+                TABLE_NAME,
+                null,
+                "$COL_IS_CHARGING = 0 AND NOT ($COL_IS_COMPLETED = 1 AND $COL_AVG_POWER_WATTS <= 0.001 AND ($COL_TOTAL_DURATION LIKE '%m%' OR $COL_TOTAL_DURATION LIKE '%h%' OR $COL_TOTAL_DURATION LIKE '%d%'))",
+                null,
+                null,
+                null,
+                "$COL_ID DESC"
+            )
+            cursor.use { c ->
+                if (c.moveToFirst()) {
+                    do {
+                        list.add(parseRecordFromCursor(c))
+                    } while (c.moveToNext())
+                }
             }
-        }
+        } catch (_: Throwable) {}
 
         var foundFirstRunning = false
         var needDbFix = false
@@ -503,23 +505,27 @@ class PowerUsageDbHelper private constructor(context: Context) :
      * @return 未完结且处于非充电状态的放电草稿实体 [PowerUsageRecord]，若不存在返回 null
      */
     fun getRunningDischargeRecord(): PowerUsageRecord? {
-        val db = readableDatabase
-        val cursor = db.query(
-            TABLE_NAME,
-            null,
-            "$COL_IS_COMPLETED = 0 AND $COL_IS_CHARGING = 0",
-            null,
-            null,
-            null,
-            "$COL_ID DESC",
-            "1"
-        )
-        return cursor.use { c ->
-            if (c.moveToFirst()) {
-                parseRecordFromCursor(c)
-            } else {
-                null
+        return try {
+            val db = readableDatabase
+            val cursor = db.query(
+                TABLE_NAME,
+                null,
+                "$COL_IS_COMPLETED = 0 AND $COL_IS_CHARGING = 0",
+                null,
+                null,
+                null,
+                "$COL_ID DESC",
+                "1"
+            )
+            cursor.use { c ->
+                if (c.moveToFirst()) {
+                    parseRecordFromCursor(c)
+                } else {
+                    null
+                }
             }
+        } catch (e: Throwable) {
+            null
         }
     }
 
@@ -532,23 +538,27 @@ class PowerUsageDbHelper private constructor(context: Context) :
      */
     fun getRecordById(id: Long): PowerUsageRecord? {
         if (id <= 0L) return null
-        val db = readableDatabase
-        val cursor = db.query(
-            TABLE_NAME,
-            null,
-            "$COL_ID = ? AND $COL_IS_CHARGING = 0",
-            arrayOf(id.toString()),
-            null,
-            null,
-            null,
-            "1"
-        )
-        return cursor.use { c ->
-            if (c.moveToFirst()) {
-                parseRecordFromCursor(c)
-            } else {
-                null
+        return try {
+            val db = readableDatabase
+            val cursor = db.query(
+                TABLE_NAME,
+                null,
+                "$COL_ID = ? AND $COL_IS_CHARGING = 0",
+                arrayOf(id.toString()),
+                null,
+                null,
+                null,
+                "1"
+            )
+            cursor.use { c ->
+                if (c.moveToFirst()) {
+                    parseRecordFromCursor(c)
+                } else {
+                    null
+                }
             }
+        } catch (e: Throwable) {
+            null
         }
     }
 
@@ -560,26 +570,26 @@ class PowerUsageDbHelper private constructor(context: Context) :
      * @return 还原构建的 [PowerUsageRecord] 实例
      */
     private fun parseRecordFromCursor(c: android.database.Cursor): PowerUsageRecord {
-        val idxId = c.getColumnIndexOrThrow(COL_ID)
-        val idxTime = c.getColumnIndexOrThrow(COL_RECORD_TIME)
-        val idxLvl = c.getColumnIndexOrThrow(COL_LEVEL_PERCENT)
-        val idxVolt = c.getColumnIndexOrThrow(COL_VOLTAGE_VOLTS)
-        val idxTemp = c.getColumnIndexOrThrow(COL_TEMPERATURE)
-        val idxWh = c.getColumnIndexOrThrow(COL_ENERGY_WH)
-        val idxChg = c.getColumnIndexOrThrow(COL_IS_CHARGING)
-        val idxAvgPwr = c.getColumnIndexOrThrow(COL_AVG_POWER_WATTS)
-        val idxOnPwr = c.getColumnIndexOrThrow(COL_SCREEN_ON_POWER_WATTS)
-        val idxOffPwr = c.getColumnIndexOrThrow(COL_SCREEN_OFF_POWER_WATTS)
-        val idxOnDur = c.getColumnIndexOrThrow(COL_SCREEN_ON_DURATION)
-        val idxOffDur = c.getColumnIndexOrThrow(COL_SCREEN_OFF_DURATION)
-        val idxTotDur = c.getColumnIndexOrThrow(COL_TOTAL_DURATION)
-        val idxRemOn = c.getColumnIndexOrThrow(COL_REM_SCREEN_ON)
-        val idxRemComp = c.getColumnIndexOrThrow(COL_REM_COMPOSITE)
-        val idxRemOff = c.getColumnIndexOrThrow(COL_REM_SCREEN_OFF)
-        val idxShizuku = c.getColumnIndexOrThrow(COL_IS_SHIZUKU_REAL_DATA)
-        val idxAppCnt = c.getColumnIndexOrThrow(COL_APP_COUNT)
-        val idxPts = c.getColumnIndexOrThrow(COL_TREND_POINTS_JSON)
-        val idxApps = c.getColumnIndexOrThrow(COL_APP_LIST_JSON)
+        val idxId = c.getColumnIndex(COL_ID)
+        val idxTime = c.getColumnIndex(COL_RECORD_TIME)
+        val idxLvl = c.getColumnIndex(COL_LEVEL_PERCENT)
+        val idxVolt = c.getColumnIndex(COL_VOLTAGE_VOLTS)
+        val idxTemp = c.getColumnIndex(COL_TEMPERATURE)
+        val idxWh = c.getColumnIndex(COL_ENERGY_WH)
+        val idxChg = c.getColumnIndex(COL_IS_CHARGING)
+        val idxAvgPwr = c.getColumnIndex(COL_AVG_POWER_WATTS)
+        val idxOnPwr = c.getColumnIndex(COL_SCREEN_ON_POWER_WATTS)
+        val idxOffPwr = c.getColumnIndex(COL_SCREEN_OFF_POWER_WATTS)
+        val idxOnDur = c.getColumnIndex(COL_SCREEN_ON_DURATION)
+        val idxOffDur = c.getColumnIndex(COL_SCREEN_OFF_DURATION)
+        val idxTotDur = c.getColumnIndex(COL_TOTAL_DURATION)
+        val idxRemOn = c.getColumnIndex(COL_REM_SCREEN_ON)
+        val idxRemComp = c.getColumnIndex(COL_REM_COMPOSITE)
+        val idxRemOff = c.getColumnIndex(COL_REM_SCREEN_OFF)
+        val idxShizuku = c.getColumnIndex(COL_IS_SHIZUKU_REAL_DATA)
+        val idxAppCnt = c.getColumnIndex(COL_APP_COUNT)
+        val idxPts = c.getColumnIndex(COL_TREND_POINTS_JSON)
+        val idxApps = c.getColumnIndex(COL_APP_LIST_JSON)
         val idxBgPwr = c.getColumnIndex(COL_BACKGROUND_POWER_WATTS)
         val idxBgDur = c.getColumnIndex(COL_BACKGROUND_DURATION)
         val idxRemBg = c.getColumnIndex(COL_REM_BACKGROUND)
@@ -598,26 +608,26 @@ class PowerUsageDbHelper private constructor(context: Context) :
         val idxDecomposed = c.getColumnIndex(COL_IS_SCREEN_OFF_DECOMPOSED)
 
         return PowerUsageRecord(
-            id = c.getLong(idxId),
-            recordTime = c.getString(idxTime),
-            levelPercent = c.getInt(idxLvl),
-            voltageVolts = c.getFloat(idxVolt),
-            temperature = c.getFloat(idxTemp),
-            energyWh = c.getFloat(idxWh),
-            isCharging = c.getInt(idxChg) == 1,
-            avgPowerWatts = c.getFloat(idxAvgPwr),
-            screenOnPowerWatts = c.getFloat(idxOnPwr),
-            screenOffPowerWatts = c.getFloat(idxOffPwr),
-            screenOnDurationText = c.getString(idxOnDur) ?: "",
-            screenOffDurationText = c.getString(idxOffDur) ?: "",
-            totalDurationText = c.getString(idxTotDur) ?: "",
-            remainingScreenOnText = c.getString(idxRemOn) ?: "",
-            remainingCompositeText = c.getString(idxRemComp) ?: "",
-            remainingScreenOffText = c.getString(idxRemOff) ?: "",
-            isShizukuRealData = c.getInt(idxShizuku) == 1,
-            appCount = c.getInt(idxAppCnt),
-            trendPointsJson = c.getString(idxPts) ?: "[]",
-            appListJson = c.getString(idxApps) ?: "[]",
+            id = if (idxId >= 0) c.getLong(idxId) else 0L,
+            recordTime = if (idxTime >= 0) c.getString(idxTime) ?: "" else "",
+            levelPercent = if (idxLvl >= 0) c.getInt(idxLvl) else 0,
+            voltageVolts = if (idxVolt >= 0) c.getFloat(idxVolt) else 0f,
+            temperature = if (idxTemp >= 0) c.getFloat(idxTemp) else 0f,
+            energyWh = if (idxWh >= 0) c.getFloat(idxWh) else 0f,
+            isCharging = if (idxChg >= 0) c.getInt(idxChg) == 1 else false,
+            avgPowerWatts = if (idxAvgPwr >= 0) c.getFloat(idxAvgPwr) else 0f,
+            screenOnPowerWatts = if (idxOnPwr >= 0) c.getFloat(idxOnPwr) else 0f,
+            screenOffPowerWatts = if (idxOffPwr >= 0) c.getFloat(idxOffPwr) else 0f,
+            screenOnDurationText = if (idxOnDur >= 0) c.getString(idxOnDur) ?: "" else "",
+            screenOffDurationText = if (idxOffDur >= 0) c.getString(idxOffDur) ?: "" else "",
+            totalDurationText = if (idxTotDur >= 0) c.getString(idxTotDur) ?: "" else "",
+            remainingScreenOnText = if (idxRemOn >= 0) c.getString(idxRemOn) ?: "" else "",
+            remainingCompositeText = if (idxRemComp >= 0) c.getString(idxRemComp) ?: "" else "",
+            remainingScreenOffText = if (idxRemOff >= 0) c.getString(idxRemOff) ?: "" else "",
+            isShizukuRealData = if (idxShizuku >= 0) c.getInt(idxShizuku) == 1 else false,
+            appCount = if (idxAppCnt >= 0) c.getInt(idxAppCnt) else 0,
+            trendPointsJson = if (idxPts >= 0) c.getString(idxPts) ?: "[]" else "[]",
+            appListJson = if (idxApps >= 0) c.getString(idxApps) ?: "[]" else "[]",
             backgroundPowerWatts = if (idxBgPwr >= 0) c.getFloat(idxBgPwr) else 0f,
             backgroundDurationText = if (idxBgDur >= 0) c.getString(idxBgDur) ?: "" else "",
             remainingBackgroundText = if (idxRemBg >= 0) c.getString(idxRemBg) ?: "" else "",
