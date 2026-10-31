@@ -202,7 +202,7 @@ class ShizukuBatteryStatsParser(private val context: Context) {
             emptyMap()
         }
 
-        return parseStatsText(
+        parseStatsText(
             rawText = rawOutput,
             voltageVolts = batteryVoltageVolts,
             tempCelsius = batteryTempCelsius,
@@ -212,7 +212,17 @@ class ShizukuBatteryStatsParser(private val context: Context) {
             localHistoryTempPoints = localHistoryTempPoints,
             enableBackgroundStats = enableBackgroundStats
         )
+    } catch (e: Throwable) {
+        android.util.Log.e("ShizukuBatteryStatsParser", "parseChargedBatteryStats error: ${e.message}", e)
+        BatteryStatsResult(
+            capacityMah = 0f,
+            computedDrainMah = 0f,
+            dischargeDurationMs = 0L,
+            screenOnDurationMs = 0L,
+            appList = emptyList()
+        )
     }
+}
 
     /**
      * 解析 dumpsys 原始输出字符串。
@@ -765,17 +775,7 @@ class ShizukuBatteryStatsParser(private val context: Context) {
             totalWakeupCount = summary.totalWakeupCount,
             screenOnCount = summary.screenOnCount
         )
-    } catch (e: Throwable) {
-        android.util.Log.e("ShizukuBatteryStatsParser", "parseChargedBatteryStats error: ${e.message}", e)
-        BatteryStatsResult(
-            capacityMah = 0f,
-            computedDrainMah = 0f,
-            dischargeDurationMs = 0L,
-            screenOnDurationMs = 0L,
-            appList = emptyList()
-        )
     }
-}
 
     /**
      * 异步在后台线程中通过 Shizuku 执行 pm list packages -U 并合并至全局 UID 缓存，避免冷启动下拉刷新被此命令阻塞数秒。
