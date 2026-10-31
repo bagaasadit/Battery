@@ -148,8 +148,9 @@ object SysfsBatterySampler {
     private fun calculateCurrentFromChargeCounter(bm: BatteryManager): Float? {
         val rawCounter = bm.getIntProperty(BatteryManager.BATTERY_PROPERTY_CHARGE_COUNTER).toLong()
         if (rawCounter <= 0L) return null
-        val chargeMah = com.battery.analysis.domain.estimator.BatteryUnitNormalizer.normalizeChargeCounterToMah(rawCounter = rawCounter)
-        if (chargeMah <= 0f) return null
+        val chargeMahDouble = com.battery.analysis.domain.estimator.BatteryUnitNormalizer.normalizeChargeCounterToMah(rawCounter = rawCounter)
+        if (chargeMahDouble == null || chargeMahDouble <= 0.0) return null
+        val chargeMah = chargeMahDouble.toFloat()
         val now = android.os.SystemClock.elapsedRealtime()
         val prevMah = lastCoulombChargeMah
         val prevTime = lastCoulombTimestampMs

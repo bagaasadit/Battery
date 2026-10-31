@@ -117,8 +117,8 @@ class AppPowerUsageAdapter : RecyclerView.Adapter<RecyclerView.ViewHolder>() {
                     o.backgroundTimeMs == n.backgroundTimeMs &&
                     o.foregroundEnergyWh == n.foregroundEnergyWh &&
                     o.backgroundEnergyWh == n.backgroundEnergyWh &&
-                    o.foregroundAvgWatts == n.foregroundAvgWatts &&
-                    o.backgroundAvgWatts == n.backgroundAvgWatts &&
+                    o.foregroundPowerWatts == n.foregroundPowerWatts &&
+                    o.backgroundPowerWatts == n.backgroundPowerWatts &&
                     o.avgTemperature == n.avgTemperature &&
                     o.maxTemperature == n.maxTemperature &&
                     o.appName == n.appName
