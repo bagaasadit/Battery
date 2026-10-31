@@ -626,6 +626,9 @@ class PowerUsageFragment : Fragment() {
                     powerManager.getCachedPowerPackage()?.let { cached ->
                         renderFullPowerData(cached, markAsRefreshed = false)
                     }
+                    startDischargePolling()
+                } else {
+                    startDischargePolling()
                 }
             }
             updateShizukuBannerState()
@@ -1606,6 +1609,9 @@ class PowerUsageFragment : Fragment() {
             updateScrollLimitForShortList()
             binding.appbarPower.requestLayout()
             binding.coordinatorPower.requestLayout()
+            if (!isViewingSnapshot) {
+                startDischargePolling()
+            }
 
             if (showToast) {
 //                Toast.makeText(requireContext(), getString(R.string.toast_auto_switch_discharging), Toast.LENGTH_SHORT).show()
@@ -1721,17 +1727,103 @@ class PowerUsageFragment : Fragment() {
         chargingPollingJob = null
     }
 
-    /** 放电数据前台轻量实时刷新协程（默认 2 秒一次） */
+    /** 放电数据前台轻量实时刷新协程（默认 2 秒一次瞬时硬件指标，30 秒一次静默全量同步） */
     private var dischargePollingJob: Job? = null
 
     /**
-     * 取消放电数据前台自动刷新协程。
-     * 耗电统计页面已移除前台定时自动刷新轮询，避免频繁自动刷新打扰用户浏览应用列表与统计指标；
-     * 用户可通过顶部下拉手动刷新实时数据，或在重新进入界面时单次加载。
+     * 启动放电数据前台智能混合实时刷新协程（方案 A）：
+     * 1. 每 2 秒微秒级采样底层 Linux sysfs / JNI 硬件物理指标（Watt, Volt, Temp, Wh），零 CPU 开销，实时更新顶部卡片；
+     * 2. 每 30 秒在后台静默同步一次全量应用能耗统计（dumpsys batterystats），并通过 DiffUtil 平滑更新列表。
      */
     private fun startDischargePolling() {
         dischargePollingJob?.cancel()
-        dischargePollingJob = null
+        dischargePollingJob = viewLifecycleOwner.lifecycleScope.launch(Dispatchers.IO) {
+            var loopCount = 0
+            while (isActive) {
+                delay(2000L)
+                if (!isActive) break
+
+                val ctx = context ?: break
+                if (_binding == null || currentDisplayTab != 0 || isViewingSnapshot) {
+                    break
+                }
+                if (chargingManager.isCharging()) {
+                    break
+                }
+
+                // 1. 每 2 秒微秒级采样底层硬件物理指标 (Watt, Volt, Temp, Wh)
+                val status = powerManager.getCurrentBatteryStatus()
+                if (status.isCharging) break
+
+                val hwSample = try {
+                    com.battery.analysis.util.SysfsBatterySampler.sampleHardwareDischarge(
+                        context = ctx,
+                        fallbackVoltageVolts = status.voltageVolts,
+                        fallbackTempCelsius = status.temperature,
+                        allowProcessFork = false
+                    )
+                } catch (_: Throwable) {
+                    null
+                }
+
+                val curVolt = hwSample?.voltageVolts ?: status.voltageVolts
+                val curTemp = hwSample?.temperatureCelsius ?: status.temperature
+                val curWatt = hwSample?.powerWatts
+
+                withContext(Dispatchers.Main) {
+                    if (_binding == null || currentDisplayTab != 0 || isViewingSnapshot) return@withContext
+
+                    // 更新概览指标卡片瞬时电压与温度
+                    val lastUnplugWh = powerManager.getLastUnplugEnergyWh()
+                    adapter.updateOverviewMetrics(
+                        energyWh = status.energyWh,
+                        totalEnergyWh = status.totalEnergyWh,
+                        lastUnplugWh = lastUnplugWh,
+                        temp = curTemp,
+                        volt = curVolt,
+                        isCharging = false
+                    )
+
+                    // 实时更新当前亮屏瞬时功耗 (Watt)
+                    if (curWatt != null && curWatt >= 0.05f) {
+                        val instantWattStr = String.format(Locale.getDefault(), "%.2fW", curWatt)
+                        binding.tvMetricScreenOnPower.setUnitText(instantWattStr)
+                    }
+
+                    adapter.updateOverviewStats(
+                        overviewStats = lastRenderedPackage?.overviewStats,
+                        totalCapacityWh = status.totalEnergyWh,
+                        batteryLevelPercent = status.levelPercent.toFloat(),
+                        remainingEnergyWh = status.energyWh,
+                        tempCelsius = curTemp,
+                        trendPoints = lastRenderedPackage?.trendPoints,
+                        forceRecalculateRuntime = false
+                    )
+                }
+
+                // 2. 每 30 秒 (15 次循环) 执行一次静默后台全量同步 (更新 App 消耗列表与时间轴)
+                loopCount++
+                if (loopCount >= 15) {
+                    loopCount = 0
+                    try {
+                        val statsPrefs = ctx.getSharedPreferences(PREFS_POWER_STATS, Context.MODE_PRIVATE)
+                        val isBgStatsEnabled = statsPrefs.getBoolean(PREF_KEY_ENABLE_BACKGROUND_STATS, false)
+                        val fullPackage = powerManager.loadPowerData(currentMode, enableBackgroundStats = isBgStatsEnabled)
+
+                        withContext(Dispatchers.Main) {
+                            if (_binding != null && currentDisplayTab == 0 && !isViewingSnapshot && !chargingManager.isCharging()) {
+                                // 若用户正在手势滑动列表，则延后到空闲时刷新以保障 120 FPS 流畅度
+                                if (binding.recyclerAppUsage.scrollState == androidx.recyclerview.widget.RecyclerView.SCROLL_STATE_IDLE) {
+                                    renderDischargeRealtimeIncremental(fullPackage)
+                                }
+                            }
+                        }
+                    } catch (e: Throwable) {
+                        android.util.Log.e("PowerUsageFragment", "Silent discharge full sync failed: ${e.message}")
+                    }
+                }
+            }
+        }
     }
 
     /**
@@ -1814,7 +1906,7 @@ class PowerUsageFragment : Fragment() {
         )
 
         // 异步更新过去 7 天加权放电统计速度与充满电使用时间（增量更新不重算剩余续航）
-        val appContext = requireContext().applicationContext
+        val appContext = context?.applicationContext ?: return
         viewLifecycleOwner.lifecycleScope.launch(Dispatchers.IO) {
             val stats = com.battery.analysis.util.SevenDaysDischargeCalculator.calculateSevenDaysStats(
                 context = appContext,
@@ -2135,6 +2227,9 @@ class PowerUsageFragment : Fragment() {
                     checkNormalPermissionBanner()
                     renderFullPowerData(fullPackage, timelineState)
                     binding.swipeRefreshLayout.isRefreshing = false
+                    if (!isViewingSnapshot && currentDisplayTab == 0 && !chargingManager.isCharging()) {
+                        startDischargePolling()
+                    }
                 }
             } catch (e: Throwable) {
                 android.util.Log.e("PowerUsageFragment", "loadData failed: ${e.message}", e)
