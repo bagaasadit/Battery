@@ -2005,6 +2005,10 @@ class PowerUsageManager private constructor(private val context: Context) {
             ensureDischargeSamplesLoaded()
             localScreenOffAwakeDurationMs += screenOffAwakeMs
             localScreenOffDeepSleepDurationMs += deepSleepMs
+            dischargeAccumulator.screenOffDurationMs += screenOffRealtimeMs
+            if (hwEnergyWh > 0f) {
+                dischargeAccumulator.screenOffJoules += (hwEnergyWh.toDouble() * 3600.0)
+            }
             if (screenOffAwakeMs > 0L) {
                 localScreenOffAwakeCount++
             }
@@ -4022,8 +4026,8 @@ class PowerUsageManager private constructor(private val context: Context) {
                 var effectiveUnplugTime = unplugTime
                 if (stats.detectedUnplugLevel != null && stats.detectedUnplugLevel >= batterySnapshot.levelPercent) {
                     val detectedTs = stats.detectedUnplugTs
-                    val shouldAdoptDetected = detectedTs != null && detectedTs > 0L && detectedTs <= now &&
-                            (effectiveUnplugTime <= 0L || detectedTs > effectiveUnplugTime)
+                    val isUnplugSessionStale = effectiveUnplugTime <= 0L || (now - effectiveUnplugTime) > (48 * 3600_000L)
+                    val shouldAdoptDetected = detectedTs != null && detectedTs > 0L && detectedTs <= now && isUnplugSessionStale
                     if (shouldAdoptDetected) {
                         effectiveUnplugLevel = stats.detectedUnplugLevel
                         if (detectedTs != null && detectedTs > 0L) {
@@ -4033,6 +4037,10 @@ class PowerUsageManager private constructor(private val context: Context) {
                             .putInt(PREF_KEY_LAST_UNPLUG_LEVEL, effectiveUnplugLevel)
                             .putLong(PREF_KEY_LAST_UNPLUG_TIME, effectiveUnplugTime)
                             .apply()
+                        saveUnplugEnergy(effectiveUnplugLevel)
+                    } else if (effectiveUnplugLevel <= 0 || effectiveUnplugLevel < batterySnapshot.levelPercent) {
+                        effectiveUnplugLevel = stats.detectedUnplugLevel
+                        prefs.edit().putInt(PREF_KEY_LAST_UNPLUG_LEVEL, effectiveUnplugLevel).apply()
                         saveUnplugEnergy(effectiveUnplugLevel)
                     }
                 }
@@ -4046,18 +4054,31 @@ class PowerUsageManager private constructor(private val context: Context) {
                 val startTs = now - durationMs
                 val (appIntervals, screenIntervals) = queryUsageIntervals(startTs, now)
 
-                // 优先通过高精度系统屏幕事件流校准真实亮屏与息屏时长，彻底杜绝息屏时长被误判为 0
+                // 优先采信底层 dumpsys batterystats 真实硬件亮屏与息屏统计，辅以高精度屏幕事件流与监控服务差分数据
                 val eventScreenOnMs = calculateScreenOnDurationFromIntervals(screenIntervals, startTs, now)
                 val eventScreenOffMs = (durationMs - eventScreenOnMs).coerceAtLeast(0L)
 
                 val screenOnMs: Long
                 val screenOffMs: Long
-                if (screenIntervals.isNotEmpty() && eventScreenOnMs > 0L) {
+                val localOffMs = (localScreenOffAwakeDurationMs + localScreenOffDeepSleepDurationMs).coerceIn(0L, durationMs)
+
+                if (stats.screenOffDurationMs > 0L) {
+                    screenOffMs = stats.screenOffDurationMs.coerceAtMost(durationMs)
+                    screenOnMs = if (stats.screenOnDurationMs > 0L) {
+                        stats.screenOnDurationMs.coerceIn(0L, (durationMs - screenOffMs).coerceAtLeast(0L))
+                    } else {
+                        (durationMs - screenOffMs).coerceAtLeast(0L)
+                    }
+                } else if (stats.dischargeDurationMs > stats.screenOnDurationMs && stats.dischargeDurationMs > 0L) {
+                    val impliedOff = (stats.dischargeDurationMs - stats.screenOnDurationMs).coerceAtLeast(0L)
+                    screenOffMs = impliedOff.coerceAtMost(durationMs)
+                    screenOnMs = stats.screenOnDurationMs.coerceIn(0L, (durationMs - screenOffMs).coerceAtLeast(0L))
+                } else if (screenIntervals.isNotEmpty() && eventScreenOnMs > 0L && eventScreenOffMs > 0L) {
                     screenOnMs = eventScreenOnMs.coerceIn(0L, durationMs)
                     screenOffMs = eventScreenOffMs.coerceIn(0L, durationMs)
-                } else if (stats.screenOffDurationMs > 0L) {
-                    screenOffMs = stats.screenOffDurationMs.coerceAtMost(durationMs)
-                    screenOnMs = stats.screenOnDurationMs.coerceIn(0L, (durationMs - screenOffMs).coerceAtLeast(0L))
+                } else if (localOffMs > 0L) {
+                    screenOffMs = localOffMs.coerceAtMost(durationMs)
+                    screenOnMs = (durationMs - screenOffMs).coerceAtLeast(0L)
                 } else {
                     screenOnMs = stats.screenOnDurationMs.coerceIn(0L, durationMs)
                     screenOffMs = (durationMs - screenOnMs).coerceAtLeast(0L)
@@ -4109,11 +4130,9 @@ class PowerUsageManager private constructor(private val context: Context) {
                 if (durationMs < MIN_DISCHARGE_SANITY_DURATION_MS && dropPercent > 1) {
                     startLevel = currentLevel
                     effectiveUnplugLevel = currentLevel
-                    effectiveUnplugTime = now
                     dropPercent = 0
                     prefs.edit()
                         .putInt(PREF_KEY_LAST_UNPLUG_LEVEL, currentLevel)
-                        .putLong(PREF_KEY_LAST_UNPLUG_TIME, now)
                         .apply()
                     saveUnplugEnergy(currentLevel)
                 }
@@ -6165,11 +6184,23 @@ class PowerUsageManager private constructor(private val context: Context) {
                     if (endTime > activeStart) {
                         screenIntervals.add(ScreenInteractiveInterval(activeStart, endTime))
                     }
-                } else if (screenIntervals.isEmpty() || screenIntervals.last().endTs < endTime) {
-                    val lastEnd = if (screenIntervals.isNotEmpty()) screenIntervals.last().endTs else startTime
+                } else if (screenIntervals.isNotEmpty() && screenIntervals.last().endTs < endTime) {
+                    val lastEnd = screenIntervals.last().endTs
                     val activeStart = maxOf(lastEnd, startTime)
                     if (endTime > activeStart) {
                         screenIntervals.add(ScreenInteractiveInterval(activeStart, endTime))
+                    }
+                } else if (screenIntervals.isEmpty()) {
+                    // 若系统未派发屏幕交互事件（常见于部分 OEM 如 Xiaomi/HyperOS），
+                    // 仅记录当前最近一次亮屏交互窗口（最多追溯至最近前台事件或当前 30 秒），
+                    // 严禁从 startTime 起始虚构全时长亮屏，杜绝息屏时长被彻底吞噬归零
+                    val recentStart = if (appIntervals.isNotEmpty()) {
+                        maxOf(startTime, appIntervals.last().startTs)
+                    } else {
+                        maxOf(startTime, endTime - 30_000L)
+                    }
+                    if (endTime > recentStart) {
+                        screenIntervals.add(ScreenInteractiveInterval(recentStart, endTime))
                     }
                 }
             } else if (screenOnStart != null && endTime > screenOnStart) {
@@ -6705,12 +6736,15 @@ class PowerUsageManager private constructor(private val context: Context) {
         val (_, screenIntervals) = queryUsageIntervals(startTs, now)
         val eventScreenOnMs = calculateScreenOnDurationFromIntervals(screenIntervals, startTs, now)
         val fgSum = appList.sumOf { it.foregroundTimeMs }
-        val screenOnMs = if (screenIntervals.isNotEmpty() && eventScreenOnMs > 0L) {
+        val localOffMs = (localScreenOffAwakeDurationMs + localScreenOffDeepSleepDurationMs).coerceIn(0L, totalMs)
+        val screenOnMs = if (screenIntervals.isNotEmpty() && eventScreenOnMs > 0L && (totalMs - eventScreenOnMs) > 0L) {
             eventScreenOnMs.coerceIn(0L, totalMs)
+        } else if (localOffMs > 0L) {
+            (totalMs - localOffMs).coerceAtLeast(0L)
         } else if (fgSum > 0) {
             fgSum.coerceAtMost(totalMs)
         } else {
-            0L
+            eventScreenOnMs.coerceIn(0L, totalMs)
         }
         val screenOffMs = (totalMs - screenOnMs).coerceAtLeast(0L)
 
@@ -6731,7 +6765,6 @@ class PowerUsageManager private constructor(private val context: Context) {
             dropPercent = 0
             prefs.edit()
                 .putInt(PREF_KEY_LAST_UNPLUG_LEVEL, currentLevel)
-                .putLong(PREF_KEY_LAST_UNPLUG_TIME, now)
                 .apply()
             saveUnplugEnergy(currentLevel)
         }

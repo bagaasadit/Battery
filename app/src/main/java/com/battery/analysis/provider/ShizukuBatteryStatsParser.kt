@@ -278,12 +278,15 @@ class ShizukuBatteryStatsParser(private val context: Context) {
         var inPowerUseSection = false
         var inBatteryHistorySection = false
         var inDischargeStepSection = false
-        var historyBaseTs = if (unplugTime > 0L) unplugTime else (now - dischargeDurationMs)
-        var currentHistoryTs = historyBaseTs
+        var hasResetTime = false
+        var resetTimeMs = 0L
+        var currentOffsetMs = 0L
 
-        var detectedUnplugTs: Long? = null
+        val rawHistoryPoints = mutableListOf<Pair<Long, Int>>()
+        val rawHistoryTempPoints = mutableListOf<Pair<Long, Float>>()
+        var detectedUnplugOffsetMs: Long? = null
         var detectedUnplugLevel: Int? = null
-        var lastPluggedTs: Long? = null
+        var lastPluggedOffsetMs: Long? = null
 
         for (line in rawText.lineSequence()) {
             val trimmed = line.trim()
@@ -314,7 +317,8 @@ class ShizukuBatteryStatsParser(private val context: Context) {
                         resetMatcher.group(5)!!.toInt(),
                         resetMatcher.group(6)!!.toInt()
                     )
-                    currentHistoryTs = cal.timeInMillis
+                    resetTimeMs = cal.timeInMillis
+                    hasResetTime = true
                 } catch (_: Exception) {}
             }
 
@@ -343,17 +347,17 @@ class ShizukuBatteryStatsParser(private val context: Context) {
                         }
                         val level = hMatcher.group(2)?.toIntOrNull()
                         if (level != null && level in 1..100) {
-                            currentHistoryTs += deltaMs
+                            currentOffsetMs += deltaMs
                             deltaMs = 0L
                             val isUnplug = trimmed.contains("-plugged", ignoreCase = true)
                             val isPlug = trimmed.contains("+plugged", ignoreCase = true)
                             if (isUnplug) {
-                                detectedUnplugTs = currentHistoryTs
+                                detectedUnplugOffsetMs = currentOffsetMs
                                 detectedUnplugLevel = level
                             } else if (isPlug) {
-                                lastPluggedTs = currentHistoryTs
+                                lastPluggedOffsetMs = currentOffsetMs
                             }
-                            historyPoints.add(Pair(currentHistoryTs, level))
+                            rawHistoryPoints.add(Pair(currentOffsetMs, level))
                         }
                     } else {
                         val deltaMatcher = REGEX_HISTORY_TIME_DELTA.matcher(trimmed)
@@ -367,23 +371,23 @@ class ShizukuBatteryStatsParser(private val context: Context) {
                         if (levelMatcher.find()) {
                             val level = levelMatcher.group(1)?.toIntOrNull()
                             if (level != null && level in 1..100) {
-                                currentHistoryTs += deltaMs
+                                currentOffsetMs += deltaMs
                                 deltaMs = 0L
                                 val isUnplug = trimmed.contains("-plugged", ignoreCase = true)
                                 val isPlug = trimmed.contains("+plugged", ignoreCase = true)
                                 if (isUnplug) {
-                                    detectedUnplugTs = currentHistoryTs
+                                    detectedUnplugOffsetMs = currentOffsetMs
                                     detectedUnplugLevel = level
                                 } else if (isPlug) {
-                                    lastPluggedTs = currentHistoryTs
+                                    lastPluggedOffsetMs = currentOffsetMs
                                 }
-                                historyPoints.add(Pair(currentHistoryTs, level))
+                                rawHistoryPoints.add(Pair(currentOffsetMs, level))
                             }
                         }
                     }
 
                     if (deltaMs > 0L) {
-                        currentHistoryTs += deltaMs
+                        currentOffsetMs += deltaMs
                     }
 
                     // 2. 提取该时序点的电池温度（系统记录单位为 0.1℃，转换为摄氏度）
@@ -392,8 +396,7 @@ class ShizukuBatteryStatsParser(private val context: Context) {
                         val rawT = tempMatcher.group(1)?.toFloatOrNull()
                         if (rawT != null) {
                             val tVal = Math.round(rawT) / 10f
-                            historyTempList.add(tVal)
-                            historyTempPoints.add(Pair(currentHistoryTs, tVal))
+                            rawHistoryTempPoints.add(Pair(currentOffsetMs, tVal))
                         }
                     }
                 }
@@ -706,6 +709,25 @@ class ShizukuBatteryStatsParser(private val context: Context) {
                 it.foregroundTimeMs > 0L || (it.isUninstalledApp() && it.hasEffectiveEnergy()) || ((it.directEnergyWh ?: 0f) > 0.001f)
             }
         }.toMutableList()
+
+        // 6.1 将相对历史时序点科学映射至真实物理绝对时间戳
+        // 彻底杜绝缺乏 RESET:TIME 时因单向累加导致的拔电时刻未来漂移与刷新归零缺陷
+        val totalHistorySpanMs = currentOffsetMs
+        val historyBaseTs = if (hasResetTime && resetTimeMs > 0L) {
+            resetTimeMs
+        } else {
+            (now - totalHistorySpanMs).coerceAtLeast(0L)
+        }
+        val detectedUnplugTs = if (detectedUnplugOffsetMs != null) historyBaseTs + detectedUnplugOffsetMs else null
+        val lastPluggedTs = if (lastPluggedOffsetMs != null) historyBaseTs + lastPluggedOffsetMs else null
+        for (p in rawHistoryPoints) {
+            historyPoints.add(Pair(historyBaseTs + p.first, p.second))
+        }
+        for (p in rawHistoryTempPoints) {
+            val pointTs = historyBaseTs + p.first
+            historyTempPoints.add(Pair(pointTs, p.second))
+            historyTempList.add(p.second)
+        }
 
         // 7. 校验最近一次拔电起点与消除长段充满待机平线
         // 遵循物理客观真值原则：若未探测到真实断开充电事件，拔电时间戳与电量如实为 null，绝不伪造保底
@@ -2089,7 +2111,7 @@ class ShizukuBatteryStatsParser(private val context: Context) {
 
             val now = System.currentTimeMillis()
             val elapsedSinceUnplug = if (unplugTime > 0L) (now - unplugTime).coerceAtLeast(1000L) else 0L
-            if (unplugTime > 0L && dischargeDurationMs > elapsedSinceUnplug) {
+            if (unplugTime > 0L && elapsedSinceUnplug >= 60_000L && dischargeDurationMs > (elapsedSinceUnplug + 15_000L)) {
                 dischargeDurationMs = elapsedSinceUnplug
             }
 
@@ -2387,10 +2409,12 @@ class ShizukuBatteryStatsParser(private val context: Context) {
          * @return 包含拔电时间戳（毫秒）与拔电电量百分比的配对实体 [Pair]，若未探测到则字段对应为 null
          */
         fun extractDetectedUnplugFromHistory(rawText: String, unplugTime: Long = 0L): Pair<Long?, Int?> {
-            var currentHistoryTs = if (unplugTime > 0L) unplugTime else 0L
-            var detectedUnplugTs: Long? = null
-            var detectedUnplugLevel: Int? = null
             var inBatteryHistorySection = false
+            var hasResetTime = false
+            var resetTimeMs = 0L
+            var currentOffsetMs = 0L
+            var detectedUnplugOffsetMs: Long? = null
+            var detectedUnplugLevel: Int? = null
 
             for (line in rawText.lineSequence()) {
                 val trimmed = line.trim()
@@ -2406,7 +2430,8 @@ class ShizukuBatteryStatsParser(private val context: Context) {
                             resetMatcher.group(5)!!.toInt(),
                             resetMatcher.group(6)!!.toInt()
                         )
-                        currentHistoryTs = cal.timeInMillis
+                        resetTimeMs = cal.timeInMillis
+                        hasResetTime = true
                     } catch (_: Exception) {}
                 }
 
@@ -2433,11 +2458,11 @@ class ShizukuBatteryStatsParser(private val context: Context) {
                             }
                             val level = hMatcher.group(2)?.toIntOrNull()
                             if (level != null && level in 1..100) {
-                                currentHistoryTs += deltaMs
+                                currentOffsetMs += deltaMs
                                 deltaMs = 0L
                                 val isUnplug = trimmed.contains("-plugged", ignoreCase = true)
                                 if (isUnplug) {
-                                    detectedUnplugTs = currentHistoryTs
+                                    detectedUnplugOffsetMs = currentOffsetMs
                                     detectedUnplugLevel = level
                                 }
                             }
@@ -2453,23 +2478,30 @@ class ShizukuBatteryStatsParser(private val context: Context) {
                             if (levelMatcher.find()) {
                                 val level = levelMatcher.group(1)?.toIntOrNull()
                                 if (level != null && level in 1..100) {
-                                    currentHistoryTs += deltaMs
+                                    currentOffsetMs += deltaMs
                                     deltaMs = 0L
                                     val isUnplug = trimmed.contains("-plugged", ignoreCase = true)
                                     if (isUnplug) {
-                                        detectedUnplugTs = currentHistoryTs
+                                        detectedUnplugOffsetMs = currentOffsetMs
                                         detectedUnplugLevel = level
                                     }
                                 }
                             }
                         }
                         if (deltaMs > 0L) {
-                            currentHistoryTs += deltaMs
+                            currentOffsetMs += deltaMs
                         }
                     }
                 }
             }
 
+            val now = System.currentTimeMillis()
+            val baseTs = if (hasResetTime && resetTimeMs > 0L) {
+                resetTimeMs
+            } else {
+                (now - currentOffsetMs).coerceAtLeast(0L)
+            }
+            val detectedUnplugTs = if (detectedUnplugOffsetMs != null) baseTs + detectedUnplugOffsetMs else null
             return Pair(detectedUnplugTs, detectedUnplugLevel)
         }
     }
