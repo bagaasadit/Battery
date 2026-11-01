@@ -4913,9 +4913,13 @@ class PowerUsageManager private constructor(private val context: Context) {
             defaultTempCelsius = currentBattery.temperature
         )
 
-        val newAvgWatts = if (intTotalPowerWatts > 0.05f) intTotalPowerWatts else basePackage.overviewStats.avgPowerWatts
-        val newScreenOnWatts = if (intOnPowerWatts > 0.05f) intOnPowerWatts else basePackage.overviewStats.screenOnPowerWatts
-        val newScreenOffWatts = if (intOffPowerWatts > 0.05f) intOffPowerWatts else basePackage.overviewStats.screenOffPowerWatts
+        val newScreenOnWatts = if (intOnPowerWatts in 0.05f..MAX_PHYSICAL_DISCHARGE_WATTS) intOnPowerWatts else basePackage.overviewStats.screenOnPowerWatts
+        val newScreenOffWatts = if (intOffPowerWatts in 0.01f..MAX_PHYSICAL_DISCHARGE_WATTS) intOffPowerWatts else basePackage.overviewStats.screenOffPowerWatts
+        val newAvgWatts = if (intTotalPowerWatts in 0.05f..MAX_PHYSICAL_DISCHARGE_WATTS) intTotalPowerWatts
+            else if (newScreenOnWatts in 0.05f..MAX_PHYSICAL_DISCHARGE_WATTS && basePackage.overviewStats.screenOffDurationMs < 1000L) newScreenOnWatts
+            else if (basePackage.overviewStats.avgPowerWatts in 0.05f..MAX_PHYSICAL_DISCHARGE_WATTS) basePackage.overviewStats.avgPowerWatts
+            else if (newScreenOnWatts in 0.05f..MAX_PHYSICAL_DISCHARGE_WATTS) newScreenOnWatts
+            else 0f
 
         val updatedOverview = basePackage.overviewStats.copy(
             avgPowerWatts = newAvgWatts,
@@ -6302,20 +6306,28 @@ class PowerUsageManager private constructor(private val context: Context) {
         val steps = 40 // 40 个密集采样时间切片，实现紧凑的俄罗斯方块柱状排布效果
 
         val targetLevel = currentLevel.coerceIn(0, 100)
-        val safeStart = if (startLevel in 0..100) startLevel else targetLevel
+        // 核心修复：若持续时长不足 60 秒且 delta > 1%，自动校准起始电量为当前电量，杜绝除微小时长暴涨至数万 W 与 4 分钟估算缺陷
+        val safeStart = if (durationMs < 60_000L && startLevel in 0..100 && (startLevel - targetLevel) > 1) {
+            targetLevel
+        } else if (startLevel in 0..100) {
+            startLevel
+        } else {
+            targetLevel
+        }
         val actualStartLevel = max(safeStart, targetLevel)
         val delta = (actualStartLevel - targetLevel).coerceAtLeast(0)
         val totalDischargeHours = duration / 3600000f
         val effectiveDeviceCapacity = getEffectiveDeviceCapacityMah()
         val nominalVoltageVolts = BatteryEnergyCalculator.DEFAULT_NOMINAL_VOLTAGE_VOLTS
-        val defaultAvgWatts = if (totalDischargeHours > 0f && delta > 0) {
+        val defaultAvgWatts = if (durationMs >= 60_000L && totalDischargeHours > 0f && delta > 0) {
             val rawMah = effectiveDeviceCapacity * (delta / 100f)
-            (rawMah * nominalVoltageVolts) / (1000f * totalDischargeHours)
+            val w = (rawMah * nominalVoltageVolts) / (1000f * totalDischargeHours)
+            if (w.isFinite() && w in 0.05f..MAX_PHYSICAL_DISCHARGE_WATTS) w else 0f
         } else {
             0f
         }
-        val effectiveOnWatts = if (screenOnPowerWatts > 0f) screenOnPowerWatts else defaultAvgWatts
-        val effectiveOffWatts = if (screenOffPowerWatts > 0f) screenOffPowerWatts else 0f
+        val effectiveOnWatts = if (screenOnPowerWatts in 0.05f..MAX_PHYSICAL_DISCHARGE_WATTS) screenOnPowerWatts else defaultAvgWatts
+        val effectiveOffWatts = if (screenOffPowerWatts in 0.01f..MAX_PHYSICAL_DISCHARGE_WATTS) screenOffPowerWatts else 0f
 
         val now = System.currentTimeMillis()
         val startTs = now - duration

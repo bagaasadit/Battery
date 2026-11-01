@@ -104,6 +104,7 @@ class PowerUsageFragment : Fragment() {
 
     // 当前界面呈现的完整耗电数据包缓存
     private var lastRenderedPackage: FullPowerDataPackage? = null
+    private var lastPackageRenderTimeMs: Long = 0L
 
     /** 充电图表上一次渲染的数据点数量缓存，用于增量对比追加以消除全量重绘 */
     private var lastRenderedPointsCount: Int = -1
@@ -1789,7 +1790,7 @@ class PowerUsageFragment : Fragment() {
                     if (_binding == null || currentDisplayTab != 0 || isViewingSnapshot) return@withContext
 
                     val updateAction = {
-                        // 更新概览指标卡片瞬时电压与温度
+                        // 1. 更新概览指标卡片瞬时电压与温度
                         val lastUnplugWh = powerManager.getLastUnplugEnergyWh()
                         adapter.updateOverviewMetrics(
                             energyWh = status.energyWh,
@@ -1800,15 +1801,74 @@ class PowerUsageFragment : Fragment() {
                             isCharging = false
                         )
 
-                        // 实时更新当前亮屏瞬时功耗 (Watt，物理上限 25.0W 约束)
+                        // 2. 动态 Live Ticker：更新左上角亮屏、息屏、全局实时走动时长（彻底告别 00m01s 冻结）
+                        val baseOverview = lastRenderedPackage?.overviewStats
+                        val elapsedSinceRender = if (lastPackageRenderTimeMs > 0L) {
+                            (android.os.SystemClock.elapsedRealtime() - lastPackageRenderTimeMs).coerceAtLeast(0L)
+                        } else 0L
+
+                        val liveOverview = if (baseOverview != null) {
+                            val baseOnMs = if (baseOverview.screenOnDurationMs > 0L) baseOverview.screenOnDurationMs else parseDurationTextToMs(baseOverview.screenOnDurationText)
+                            val baseOffMs = if (baseOverview.screenOffDurationMs > 0L) baseOverview.screenOffDurationMs else parseDurationTextToMs(baseOverview.screenOffDurationText)
+                            val baseTotalMs = if (baseOverview.totalDurationMs > 0L) baseOverview.totalDurationMs else parseDurationTextToMs(baseOverview.totalDurationText)
+
+                            val liveOnMs = baseOnMs + elapsedSinceRender
+                            val liveOffMs = baseOffMs
+                            val liveTotalMs = baseTotalMs + elapsedSinceRender
+
+                            val onDurationRatioStr = if (liveTotalMs > 0L) {
+                                val ratio = (liveOnMs.toDouble() / liveTotalMs.toDouble() * 100.0).coerceIn(0.0, 100.0)
+                                String.format(Locale.getDefault(), "%.1f%%", ratio)
+                            } else "0.0%"
+
+                            val offDurationRatioStr = if (liveTotalMs > 0L) {
+                                val ratio = (liveOffMs.toDouble() / liveTotalMs.toDouble() * 100.0).coerceIn(0.0, 100.0)
+                                String.format(Locale.getDefault(), "%.1f%%", ratio)
+                            } else "0.0%"
+
+                            val onDurationStr = formatCardDuration(liveOnMs, "")
+                            val offDurationStr = formatCardDuration(liveOffMs, "")
+                            val totalDurationStr = formatCardDuration(liveTotalMs, "")
+
+                            binding.tvMetricScreenOnTime.setUnitText(formatValueWithSmallPercent(onDurationStr, onDurationRatioStr))
+                            binding.tvMetricScreenOffTime.setUnitText(formatValueWithSmallPercent(offDurationStr, offDurationRatioStr))
+                            binding.tvMetricGlobalTime.setUnitText(formatValueWithSmallPercent(totalDurationStr, "100%"))
+
+                            baseOverview.copy(
+                                screenOnDurationMs = liveOnMs,
+                                screenOffDurationMs = liveOffMs,
+                                totalDurationMs = liveTotalMs,
+                                screenOnDurationText = onDurationStr,
+                                screenOffDurationText = offDurationStr,
+                                totalDurationText = totalDurationStr
+                            )
+                        } else null
+
+                        // 3. 实时更新当前亮屏与全局瞬时功耗及放电速度 (Watt 与 %/h)
+                        val totalCapacityWh = status.totalEnergyWh
+                            ?: powerManager.getEffectiveDeviceCapacityMah().takeIf { it > 0f }?.let {
+                                BatteryEnergyCalculator.calculateTotalEnergyWh(it)
+                            } ?: BatteryEnergyCalculator.DEFAULT_NOMINAL_ENERGY_WH
+
                         if (curWatt != null && curWatt in 0.05f..25.0f) {
                             val instantWattStr = String.format(Locale.getDefault(), "%.2fW", curWatt)
                             binding.tvMetricScreenOnPower.setUnitText(instantWattStr)
+
+                            val liveDur = liveOverview?.screenOnDurationMs ?: 1000L
+                            val liveRate = PowerDischargeMetricsViewBinder.calculateDischargeRatePercentPerHour(curWatt, totalCapacityWh, liveDur)
+                            val rateSpan = PowerDischargeMetricsViewBinder.formatDischargeRateSpannable(liveRate)
+                            binding.tvMetricScreenOnSpeed.setUnitText(rateSpan)
+
+                            val isOffShort = (liveOverview?.screenOffDurationMs ?: 0L) < 1000L
+                            if (isOffShort || (baseOverview?.avgPowerWatts ?: 0f) <= 0.05f) {
+                                binding.tvMetricGlobalPower.setUnitText(instantWattStr)
+                                binding.tvMetricGlobalSpeed.setUnitText(rateSpan)
+                            }
                         }
 
                         adapter.updateOverviewStats(
-                            overviewStats = lastRenderedPackage?.overviewStats,
-                            totalCapacityWh = status.totalEnergyWh,
+                            overviewStats = liveOverview ?: lastRenderedPackage?.overviewStats,
+                            totalCapacityWh = totalCapacityWh,
                             batteryLevelPercent = status.levelPercent.toFloat(),
                             remainingEnergyWh = status.energyWh,
                             tempCelsius = curTemp,
@@ -1866,6 +1926,7 @@ class PowerUsageFragment : Fragment() {
      */
     private fun renderDischargeRealtimeIncremental(fullPackage: com.battery.analysis.manager.FullPowerDataPackage) {
         lastRenderedPackage = fullPackage
+        lastPackageRenderTimeMs = android.os.SystemClock.elapsedRealtime()
         val snapshot = fullPackage.batterySnapshot
         val overview = fullPackage.overviewStats
 
@@ -1887,9 +1948,9 @@ class PowerUsageFragment : Fragment() {
         }
         val effectiveAvgWatts = if (overview.avgPowerWatts in 0.05f..25.0f) {
             overview.avgPowerWatts
-        } else if (overview.screenOffDurationMs <= 0L && overview.screenOnPowerWatts in 0.05f..25.0f) {
+        } else if ((overview.screenOffDurationMs < 1000L || overview.avgPowerWatts <= 0.05f) && overview.screenOnPowerWatts in 0.05f..25.0f) {
             overview.screenOnPowerWatts
-        } else if (overview.screenOnDurationMs <= 0L && overview.screenOffPowerWatts in 0.05f..25.0f) {
+        } else if (overview.screenOnDurationMs < 1000L && overview.screenOffPowerWatts in 0.05f..25.0f) {
             overview.screenOffPowerWatts
         } else {
             0f
@@ -1928,6 +1989,47 @@ class PowerUsageFragment : Fragment() {
         binding.tvMetricScreenOnSpeed.setUnitText(PowerDischargeMetricsViewBinder.formatDischargeRateSpannable(onSessionRate))
         binding.tvMetricScreenOffSpeed.setUnitText(PowerDischargeMetricsViewBinder.formatDischargeRateSpannable(offSessionRate))
         binding.tvMetricGlobalSpeed.setUnitText(PowerDischargeMetricsViewBinder.formatDischargeRateSpannable(globalSessionRate))
+
+        val onDurationMs = if (overview.screenOnDurationMs > 0L) overview.screenOnDurationMs else parseDurationTextToMs(overview.screenOnDurationText)
+        val offDurationMs = if (overview.screenOffDurationMs > 0L) overview.screenOffDurationMs else parseDurationTextToMs(overview.screenOffDurationText)
+        val totalDurationMs = if (overview.totalDurationMs > 0L) overview.totalDurationMs else parseDurationTextToMs(overview.totalDurationText)
+
+        val onDurationRatioStr = if (totalDurationMs > 0L) {
+            val ratio = (onDurationMs.toDouble() / totalDurationMs.toDouble() * 100.0).coerceIn(0.0, 100.0)
+            String.format(Locale.getDefault(), "%.1f%%", ratio)
+        } else "0.0%"
+
+        val offDurationRatioStr = if (totalDurationMs > 0L) {
+            val ratio = (offDurationMs.toDouble() / totalDurationMs.toDouble() * 100.0).coerceIn(0.0, 100.0)
+            String.format(Locale.getDefault(), "%.1f%%", ratio)
+        } else "0.0%"
+
+        val onDurationStr = formatCardDuration(onDurationMs, overview.screenOnDurationText)
+        val offDurationStr = formatCardDuration(offDurationMs, overview.screenOffDurationText)
+        val totalDurationStr = formatCardDuration(totalDurationMs, overview.totalDurationText)
+
+        binding.tvMetricScreenOnTime.setUnitText(formatValueWithSmallPercent(onDurationStr, onDurationRatioStr))
+        binding.tvMetricScreenOffTime.setUnitText(formatValueWithSmallPercent(offDurationStr, offDurationRatioStr))
+        binding.tvMetricGlobalTime.setUnitText(formatValueWithSmallPercent(totalDurationStr, "100%"))
+
+        val onEnergyText = BatteryEnergyCalculator.formatDisplayEnergy(overview.screenOnEnergyWh, currentDisplayUnit)
+        val offEnergyText = BatteryEnergyCalculator.formatDisplayEnergy(overview.screenOffEnergyWh, currentDisplayUnit)
+        val totalEnergyText = BatteryEnergyCalculator.formatDisplayEnergy(overview.totalEnergyWh, currentDisplayUnit)
+        val baseTotalEnergy = totalCapacityWh.takeIf { it > 0f }
+
+        val onEnergyRatioStr = if (baseTotalEnergy != null && baseTotalEnergy > 0f) {
+            String.format(Locale.getDefault(), "%.1f%%", (overview.screenOnEnergyWh / baseTotalEnergy * 100f))
+        } else "--%"
+        val offEnergyRatioStr = if (baseTotalEnergy != null && baseTotalEnergy > 0f) {
+            String.format(Locale.getDefault(), "%.1f%%", (overview.screenOffEnergyWh / baseTotalEnergy * 100f))
+        } else "--%"
+        val globalEnergyRatioStr = if (baseTotalEnergy != null && baseTotalEnergy > 0f) {
+            String.format(Locale.getDefault(), "%.1f%%", (overview.totalEnergyWh / baseTotalEnergy * 100f))
+        } else "--%"
+
+        binding.tvMetricScreenOnEnergy.setUnitText(formatValueWithSmallPercent(onEnergyText, onEnergyRatioStr))
+        binding.tvMetricScreenOffEnergy.setUnitText(formatValueWithSmallPercent(offEnergyText, offEnergyRatioStr))
+        binding.tvMetricGlobalEnergy.setUnitText(formatValueWithSmallPercent(totalEnergyText, globalEnergyRatioStr))
 
         adapter.updateOverviewStats(
             overviewStats = overview,
@@ -2303,6 +2405,7 @@ class PowerUsageFragment : Fragment() {
         markAsRefreshed: Boolean = true
     ) {
         lastRenderedPackage = fullPackage
+        lastPackageRenderTimeMs = android.os.SystemClock.elapsedRealtime()
         powerManager.setCachedPowerPackage(fullPackage)
         if (markAsRefreshed && !isViewingSnapshot) {
             com.battery.analysis.manager.AppLifecycleTracker.markDischargeRefreshed()
@@ -2403,9 +2506,9 @@ class PowerUsageFragment : Fragment() {
         }
         val effectiveAvgWatts = if (overview.avgPowerWatts in 0.05f..25.0f) {
             overview.avgPowerWatts
-        } else if (overview.screenOffDurationMs <= 0L && overview.screenOnPowerWatts in 0.05f..25.0f) {
+        } else if ((overview.screenOffDurationMs < 1000L || overview.avgPowerWatts <= 0.05f) && overview.screenOnPowerWatts in 0.05f..25.0f) {
             overview.screenOnPowerWatts
-        } else if (overview.screenOnDurationMs <= 0L && overview.screenOffPowerWatts in 0.05f..25.0f) {
+        } else if (overview.screenOnDurationMs < 1000L && overview.screenOffPowerWatts in 0.05f..25.0f) {
             overview.screenOffPowerWatts
         } else {
             0f
@@ -2743,9 +2846,9 @@ class PowerUsageFragment : Fragment() {
         }
         val effectiveAvgWatts = if (overview.avgPowerWatts in 0.05f..25.0f) {
             overview.avgPowerWatts
-        } else if (overview.screenOffDurationMs <= 0L && overview.screenOnPowerWatts in 0.05f..25.0f) {
+        } else if ((overview.screenOffDurationMs < 1000L || overview.avgPowerWatts <= 0.05f) && overview.screenOnPowerWatts in 0.05f..25.0f) {
             overview.screenOnPowerWatts
-        } else if (overview.screenOnDurationMs <= 0L && overview.screenOffPowerWatts in 0.05f..25.0f) {
+        } else if (overview.screenOnDurationMs < 1000L && overview.screenOffPowerWatts in 0.05f..25.0f) {
             overview.screenOffPowerWatts
         } else {
             0f

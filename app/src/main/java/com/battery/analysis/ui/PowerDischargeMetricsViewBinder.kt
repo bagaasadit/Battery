@@ -594,7 +594,7 @@ object PowerDischargeMetricsViewBinder {
         val rollingBuffer = RollingDischargeBuffer.getInstanceOrNull()
         return when (rowType) {
             BatteryEnergyCalculator.ROW_SCREEN_ON -> {
-                val dur = overview.screenOnDurationMs
+                val dur = if (overview.screenOnDurationMs > 0L) overview.screenOnDurationMs else 1000L
                 val w = overview.screenOnPowerWatts.takeIf { it in 0.05f..25.0f }
                 val powerRate = if (w != null) {
                     calculateDischargeRatePercentPerHour(w, nominalCapacity, dur)
@@ -606,11 +606,11 @@ object PowerDischargeMetricsViewBinder {
                 } else null
                 val win = if (dur < 60_000L) rollingBuffer?.extractRollingScreenOnWindow(7200_000L) else null
                 val effectiveRate = (powerRate ?: win?.dischargeRatePercentPerHour ?: sessionPercentRate)?.takeIf { it in 0.01f..100.0f }
-                val effectiveDur = if (dur > 0L) dur else win?.effectiveDurationMs
+                val effectiveDur = if (overview.screenOnDurationMs > 0L) overview.screenOnDurationMs else win?.effectiveDurationMs
                 Pair(effectiveRate, effectiveDur)
             }
             BatteryEnergyCalculator.ROW_SCREEN_OFF -> {
-                val dur = overview.screenOffDurationMs
+                val dur = if (overview.screenOffDurationMs > 0L) overview.screenOffDurationMs else 1000L
                 val w = overview.screenOffPowerWatts.takeIf { it in 0.01f..25.0f }
                 val powerRate = if (w != null) {
                     calculateDischargeRatePercentPerHour(w, nominalCapacity, dur)
@@ -621,13 +621,13 @@ object PowerDischargeMetricsViewBinder {
                 } else null
                 val win = if (dur < 60_000L) rollingBuffer?.extractRollingScreenOffWindow(43200_000L) else null
                 val effectiveRate = (powerRate ?: win?.dischargeRatePercentPerHour ?: sessionPercentRate)?.takeIf { it in 0.01f..100.0f }
-                val effectiveDur = if (dur > 0L) dur else win?.effectiveDurationMs
+                val effectiveDur = if (overview.screenOffDurationMs > 0L) overview.screenOffDurationMs else win?.effectiveDurationMs
                 Pair(effectiveRate, effectiveDur)
             }
             BatteryEnergyCalculator.ROW_GLOBAL -> {
-                val dur = overview.totalDurationMs
+                val dur = if (overview.totalDurationMs > 0L) overview.totalDurationMs else 1000L
                 val w = (overview.avgPowerWatts.takeIf { it in 0.05f..25.0f }
-                    ?: if (overview.screenOffDurationMs <= 0L) overview.screenOnPowerWatts.takeIf { it in 0.05f..25.0f } else null)
+                    ?: if (overview.screenOffDurationMs < 1000L || overview.avgPowerWatts <= 0.05f) overview.screenOnPowerWatts.takeIf { it in 0.05f..25.0f } else null)
                 val totalPct = overview.screenOnPercent + overview.screenOffPercent
                 val powerRate = if (w != null) {
                     calculateDischargeRatePercentPerHour(w, nominalCapacity, dur)
@@ -638,7 +638,7 @@ object PowerDischargeMetricsViewBinder {
                 } else null
                 val win = if (dur < 60_000L) rollingBuffer?.extractRollingGlobalWindow(86400_000L) else null
                 val effectiveRate = (powerRate ?: win?.dischargeRatePercentPerHour ?: sessionPercentRate)?.takeIf { it in 0.01f..100.0f }
-                val effectiveDur = if (dur > 0L) dur else win?.effectiveDurationMs
+                val effectiveDur = if (overview.totalDurationMs > 0L) overview.totalDurationMs else win?.effectiveDurationMs
                 Pair(effectiveRate, effectiveDur)
             }
             else -> Pair(null, null)
@@ -655,17 +655,17 @@ object PowerDischargeMetricsViewBinder {
      *
      * @param powerWatts 放电平均功率（单位：W）
      * @param totalCapacityWh 电池标称/满充总能量容量（单位：Wh）
-     * @param durationMs 对应时段实际持续时长（毫秒）
+     * @param durationMs 对应时段实际持续时长（毫秒，默认1000L）
      * @return 计算得到的每小时放电百分比（单位：%/h），若数据缺失或非正数则返回 null
      */
     fun calculateDischargeRatePercentPerHour(
         powerWatts: Float,
         totalCapacityWh: Float?,
-        durationMs: Long
+        durationMs: Long = 1000L
     ): Float? {
         val safeCapWh = totalCapacityWh?.takeIf { it.isFinite() && it > 0f }
             ?: BatteryEnergyCalculator.DEFAULT_NOMINAL_ENERGY_WH
-        if (!powerWatts.isFinite() || powerWatts <= 0f || durationMs <= 0L || powerWatts > 25.0f) {
+        if (!powerWatts.isFinite() || powerWatts <= 0f || powerWatts > 25.0f) {
             return null
         }
         val rate = (powerWatts / safeCapWh) * 100f

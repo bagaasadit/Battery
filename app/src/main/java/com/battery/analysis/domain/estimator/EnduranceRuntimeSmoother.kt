@@ -181,9 +181,9 @@ class EnduranceRuntimeSmoother {
             return rawTargetRemainingMs
         }
 
-        // 核心修正：当旧平滑基准严重异常偏低（如 < 15 分钟，而真实目标 > 1 小时）
-        // 判定为前置故障残留计算，直接重新锚定基准
-        if (prevState.lastSmoothedRemainingMs < 900_000L && rawTargetRemainingMs > 3600_000L) {
+        // 核心修正：当旧平滑基准严重异常偏低（如 < 20 分钟，而真实物理目标显著偏大 >= 30 分钟）
+        // 判定为冷启动瞬态尖峰或前置故障残留计算，直接重新锚定基准，彻底杜绝 4 分钟死锁缺陷
+        if (prevState.lastSmoothedRemainingMs < 1200_000L && rawTargetRemainingMs >= 1800_000L) {
             dimensionStates[dimension] = DimensionState(
                 lastSmoothedRemainingMs = rawTargetRemainingMs,
                 lastTimestampMs = currentTimestampMs,
@@ -262,7 +262,10 @@ class EnduranceRuntimeSmoother {
                 val riseStart = if (prevState.riseStartTimestampMs > 0L) prevState.riseStartTimestampMs else currentTimestampMs
                 newRiseStartTs = riseStart
                 val durationInRise = currentTimestampMs - riseStart
-                if (durationInRise < SHORT_TERM_DEADBAND_MS && elapsedMs < SHORT_TERM_DEADBAND_MS) {
+                if (prevState.lastSmoothedRemainingMs < 1200_000L && rawTargetRemainingMs >= 1800_000L) {
+                    // 若旧基线属于短小瞬态残留，立即释放死区直接收敛至物理目标
+                    rawTargetRemainingMs
+                } else if (durationInRise < SHORT_TERM_DEADBAND_MS && elapsedMs < SHORT_TERM_DEADBAND_MS) {
                     decayedRemainingMs
                 } else {
                     val alpha = 1.0 - exp(-elapsedSec / TAU_RISE_SEC)

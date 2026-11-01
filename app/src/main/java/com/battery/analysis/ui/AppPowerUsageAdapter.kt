@@ -326,11 +326,7 @@ class AppPowerUsageAdapter : RecyclerView.Adapter<RecyclerView.ViewHolder>() {
      * @param binding 视图绑定对象
      */
     inner class FirstTimeSetupViewHolder(val binding: ItemPowerFirstTimeSetupBinding) :
-        RecyclerView.ViewHolder(binding.root) {
-        init {
-            setIsRecyclable(false)
-        }
-    }
+        RecyclerView.ViewHolder(binding.root)
 
     /**
      * 历史快照提示横幅 ViewHolder。
@@ -370,11 +366,7 @@ class AppPowerUsageAdapter : RecyclerView.Adapter<RecyclerView.ViewHolder>() {
      * @param binding 视图绑定对象
      */
     inner class UsageOverviewViewHolder(val binding: ItemPowerUsageOverviewBinding) :
-        RecyclerView.ViewHolder(binding.root) {
-        init {
-            setIsRecyclable(false)
-        }
-    }
+        RecyclerView.ViewHolder(binding.root)
 
     /**
      * 使用场景列表标题栏与操作按钮组 ViewHolder。
@@ -398,11 +390,7 @@ class AppPowerUsageAdapter : RecyclerView.Adapter<RecyclerView.ViewHolder>() {
      * @param binding 视图绑定对象
      */
     inner class ChargingContentViewHolder(val binding: ItemPowerChargingContentBinding) :
-        RecyclerView.ViewHolder(binding.root) {
-        init {
-            setIsRecyclable(false)
-        }
-    }
+        RecyclerView.ViewHolder(binding.root)
 
     // ==================== 生命周期与复用实现 ====================
 
@@ -1122,7 +1110,7 @@ class AppPowerUsageAdapter : RecyclerView.Adapter<RecyclerView.ViewHolder>() {
         if (totalCapacityWh == null || totalCapacityWh <= 0f) {
             return null
         }
-        if (powerWatts <= 0f || durationMs <= 0L) {
+        if (powerWatts <= 0f || powerWatts > 25.0f) {
             return null
         }
         val rate = (powerWatts / totalCapacityWh) * 100f
@@ -1592,6 +1580,9 @@ class AppPowerUsageAdapter : RecyclerView.Adapter<RecyclerView.ViewHolder>() {
      */
     fun setFirstTimeSetup(visible: Boolean, selectedMode: Int = 0, isInstalled: Boolean = true) {
         showFirstTimeSetup = visible
+        if (!visible) {
+            setupHolder = null
+        }
         setupSelectedMode = selectedMode
         isShizukuInstalled = isInstalled
         rebuildItems()
